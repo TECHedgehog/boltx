@@ -5,6 +5,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/paginator"
 	"github.com/charmbracelet/bubbles/spinner"
 	bubblesTable "github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
@@ -15,7 +16,8 @@ import (
 // Key bindings shared across stages.
 var (
 	keyNav      = key.NewBinding(key.WithKeys("up", "down", "k", "j"), key.WithHelp("↑↓/jk", "navigate"))
-	keySelect   = key.NewBinding(key.WithKeys("enter", " "), key.WithHelp("enter", "select"))
+	keyPageNav  = key.NewBinding(key.WithKeys("left", "right", "h", "l"), key.WithHelp("←→/hl", "page"))
+	keySelect   = key.NewBinding(key.WithKeys("enter", " "), key.WithHelp("enter/space", "toggle"))
 	keyConfirm  = key.NewBinding(key.WithKeys("enter", " "), key.WithHelp("enter", "confirm"))
 	keyBack     = key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back"))
 	keyQuit     = key.NewBinding(key.WithKeys("q", "esc"), key.WithHelp("q", "quit"))
@@ -26,9 +28,64 @@ var (
 type stage int
 
 const (
-	stageMenu    stage = iota
+	stageMenu           stage = iota
 	stageUseCase
+	stageApplyOrReview
+	stageCategoryReview
 )
+
+// CategoryOption is a single toggleable setting within a category page.
+type CategoryOption struct {
+	Label   string
+	Checked bool
+}
+
+// CategoryPage groups related options under a category name.
+type CategoryPage struct {
+	Name    string
+	Options []CategoryOption
+}
+
+// buildCategoryPages returns all category pages with defaults pre-filled for the given use case.
+func buildCategoryPages(uc detect.UseCase) []CategoryPage {
+	vps := uc == detect.UseCaseVPS
+	return []CategoryPage{
+		{
+			Name: "Firewall",
+			Options: []CategoryOption{
+				{"Enable firewall", vps},
+				{"Allow SSH (port 22)", vps},
+				{"Allow HTTP (port 80)", vps},
+				{"Allow HTTPS (port 443)", vps},
+			},
+		},
+		{
+			Name: "SSH hardening",
+			Options: []CategoryOption{
+				{"Disable root login", vps},
+				{"Disable password authentication", vps},
+			},
+		},
+		{
+			Name: "Users",
+			Options: []CategoryOption{
+				{"Create a new sudo user", false},
+			},
+		},
+		{
+			Name: "Packages",
+			Options: []CategoryOption{
+				{"git", true},
+				{"curl", true},
+				{"vim", !vps},
+				{"htop", true},
+				{"build-essential / base-devel", !vps},
+				{"ufw", vps},
+				{"fail2ban", vps},
+			},
+		},
+	}
+}
 
 // detectDoneMsg carries the result of the async environment detection.
 type detectDoneMsg struct {
@@ -47,11 +104,28 @@ type Model struct {
 	detecting     bool
 	spinner       spinner.Model
 	env           detect.Environment
-	osInfo        detect.OSInfo // reserved for Stage 3 (distro-specific commands)
+	osInfo        detect.OSInfo
 	useCaseCursor int
 	infoTable     bubblesTable.Model
 	help          help.Model
 	helpExpanded  bool
+
+	// stageApplyOrReview
+	applyOrReviewCursor int
+
+	// stageCategoryReview
+	paginator          paginator.Model
+	categoryPages      []CategoryPage
+	categoryPageCursor int
+
+	// Fixed layout — computed once after detection and terminal size are both known.
+	// leftColW and fixedH never change after layoutReady is set, keeping the box
+	// stable as the user navigates between screens.
+	rightContentW int  // measured width of the rendered info table (set after detection)
+	rightContentH int  // measured height of the rendered info table
+	leftColW      int  // left column content width (wraps text that exceeds it)
+	fixedH        int  // fixed content-area height for both columns
+	layoutReady   bool // true once leftColW and fixedH have been locked in
 }
 
 var menuItems = []string{
@@ -60,6 +134,18 @@ var menuItems = []string{
 }
 
 var useCaseOptions = []detect.UseCase{detect.UseCaseVPS, detect.UseCaseDevMachine}
+
+// useCaseDescs summarises the pre-selected defaults for each use case,
+// shown as a hint below the radio option on the use case screen.
+var useCaseDescs = []string{
+	"Firewall, SSH hardening, server packages",
+	"Dev tools and common packages",
+}
+
+var applyOrReviewOptions = []string{
+	"Apply recommended settings",
+	"Review and customize",
+}
 
 // NewModel returns the initial model.
 func NewModel() Model {
@@ -73,10 +159,16 @@ func NewModel() Model {
 	h.Styles.ShortSeparator = lipgloss.NewStyle().Foreground(muted)
 	h.Styles.Ellipsis = lipgloss.NewStyle().Foreground(muted)
 
+	p := paginator.New()
+	p.Type = paginator.Dots
+	p.ActiveDot = lipgloss.NewStyle().Foreground(purple).Render("•")
+	p.InactiveDot = lipgloss.NewStyle().Foreground(muted).Render("◦")
+
 	return Model{
 		detecting: true,
 		spinner:   s,
 		help:      h,
+		paginator: p,
 	}
 }
 
@@ -99,6 +191,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m = computeLayout(m)
 
 	case spinner.TickMsg:
 		if m.detecting {
@@ -113,6 +206,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.osInfo = msg.osInfo
 		m.useCaseCursor = int(msg.env.SuggestedUseCase())
 		m.infoTable = buildInfoTable(msg.env, msg.osInfo)
+		// Measure the right column content so computeLayout can calculate leftColW.
+		raw := m.infoTable.View()
+		if idx := strings.Index(raw, "\n"); idx >= 0 {
+			raw = raw[idx+1:]
+		}
+		rendered := infoTableBorderStyle.Render(raw)
+		m.rightContentW = lipgloss.Width(rendered)
+		m.rightContentH = lipgloss.Height(rendered)
+		m = computeLayout(m)
 
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -123,10 +225,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.helpExpanded = !m.helpExpanded
 
 		case "q", "esc":
-			if m.stage == stageMenu {
+			switch m.stage {
+			case stageMenu:
 				return m, tea.Quit
+			case stageUseCase:
+				m.stage = stageMenu
+			case stageApplyOrReview:
+				m.stage = stageUseCase
+			case stageCategoryReview:
+				m.stage = stageApplyOrReview
+				m.paginator.Page = 0
+				m.categoryPageCursor = 0
 			}
-			m.stage = stageMenu
+
+		case "left", "h":
+			if m.stage == stageCategoryReview {
+				m.paginator.PrevPage()
+				m.categoryPageCursor = 0
+			}
+
+		case "right", "l":
+			if m.stage == stageCategoryReview && !m.paginator.OnLastPage() {
+				m.paginator.NextPage()
+				m.categoryPageCursor = 0
+			}
 
 		case "up", "k":
 			switch m.stage {
@@ -137,6 +259,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case stageUseCase:
 				if !m.detecting && m.useCaseCursor > 0 {
 					m.useCaseCursor--
+				}
+			case stageApplyOrReview:
+				if m.applyOrReviewCursor > 0 {
+					m.applyOrReviewCursor--
+				}
+			case stageCategoryReview:
+				if m.categoryPageCursor > 0 {
+					m.categoryPageCursor--
 				}
 			}
 
@@ -149,6 +279,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case stageUseCase:
 				if !m.detecting && m.useCaseCursor < len(useCaseOptions)-1 {
 					m.useCaseCursor++
+				}
+			case stageApplyOrReview:
+				if m.applyOrReviewCursor < len(applyOrReviewOptions)-1 {
+					m.applyOrReviewCursor++
+				}
+			case stageCategoryReview:
+				curPage := m.categoryPages[m.paginator.Page]
+				// On the last page, cursor can reach a "Confirm →" item beyond the options.
+				maxCursor := len(curPage.Options) - 1
+				if m.paginator.OnLastPage() {
+					maxCursor++
+				}
+				if m.categoryPageCursor < maxCursor {
+					m.categoryPageCursor++
 				}
 			}
 
@@ -163,7 +307,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case stageUseCase:
 				if !m.detecting {
-					// confirmed — Stage 3 will go here
+					// Build category pages here so changes survive a back/forward trip
+					// between stageApplyOrReview and stageCategoryReview.
+					m.categoryPages = buildCategoryPages(useCaseOptions[m.useCaseCursor])
+					m.paginator.SetTotalPages(len(m.categoryPages))
+					m.paginator.Page = 0
+					m.categoryPageCursor = 0
+					m.applyOrReviewCursor = 0
+					m.stage = stageApplyOrReview
+				}
+			case stageApplyOrReview:
+				switch m.applyOrReviewCursor {
+				case 0:
+					// Apply recommended — Stage 5: run processes (not yet built)
+				case 1:
+					m.paginator.Page = 0
+					m.categoryPageCursor = 0
+					m.stage = stageCategoryReview
+				}
+			case stageCategoryReview:
+				curPage := m.categoryPages[m.paginator.Page]
+				if m.categoryPageCursor < len(curPage.Options) {
+					m.categoryPages[m.paginator.Page].Options[m.categoryPageCursor].Checked =
+						!m.categoryPages[m.paginator.Page].Options[m.categoryPageCursor].Checked
+				} else if m.paginator.OnLastPage() {
+					// Confirm → Stage 5 not yet built
 				}
 			}
 		}
@@ -172,26 +340,67 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// computeLayout locks in leftColW and fixedH the first time both the terminal
+// size and the right column measurement are available. After that it is a no-op,
+// so the box dimensions never change as the user navigates.
+//
+// Box width equation:
+//
+//	border(2) + leftPad(6) + leftColW + rightPad(4) + rightContentW = targetBoxW
+//	→ leftColW = targetBoxW − rightContentW − 12
+//
+// fixedH covers the tallest possible left-column content (Packages page ≈ 16 lines).
+func computeLayout(m Model) Model {
+	if m.layoutReady || m.width == 0 || m.rightContentW == 0 {
+		return m
+	}
+	targetBoxW := m.width - 4 // 2-char margin each side
+	if targetBoxW > 96 {
+		targetBoxW = 96
+	}
+	if targetBoxW < 72 {
+		targetBoxW = 72
+	}
+	m.leftColW = max(targetBoxW-m.rightContentW-12, 28)
+	// 16 = tallest left content (Packages page with Confirm item)
+	m.fixedH = max(16, m.rightContentH) + 2
+	m.layoutReady = true
+	return m
+}
+
 // View builds the two-column layout centered in the terminal.
 //
 // Left column:  interactive content vertically centered, hints pinned at bottom.
 // Right column: info table independently centered in the full column height.
 func (m Model) View() string {
 	leftMain := m.viewLeft()
-	hints := m.viewHints(lipgloss.Width(leftMain))
+
+	// Use the locked-in width once available; fall back to content width during
+	// the brief detection spinner phase before layoutReady is set.
+	leftW := m.leftColW
+	if leftW == 0 {
+		leftW = lipgloss.Width(leftMain)
+	}
+
+	hints := m.viewHints(leftW)
 	rightContent := m.viewRight()
 
-	mainH := lipgloss.Height(leftMain)
 	hintsH := lipgloss.Height(hints)
-	rightH := lipgloss.Height(rightContent)
 
-	// +2 buffer ensures both sides always have centering room even when
-	// one side's natural height equals the other's.
-	contentH := max(mainH, rightH) + 2
+	// Use the locked-in content height once available; fall back to adaptive.
+	contentH := m.fixedH
+	if contentH == 0 {
+		mainH := lipgloss.Height(leftMain)
+		rightH := lipgloss.Height(rightContent)
+		contentH = max(mainH, rightH) + 2
+	}
 	totalH := contentH + hintsH
 
-	// Left column: main content centered in contentH, hints pinned below.
+	// Left column: content wrapped and centered inside the fixed width × height.
+	// Width(leftW) causes lipgloss to soft-wrap any line that exceeds leftW,
+	// keeping the box from growing wider as the user moves between screens.
 	centeredLeft := lipgloss.NewStyle().
+		Width(leftW).
 		Height(contentH).
 		Align(lipgloss.Left, lipgloss.Center).
 		Render(leftMain)
@@ -219,6 +428,10 @@ func (m Model) viewLeft() string {
 	switch m.stage {
 	case stageUseCase:
 		return m.viewUseCase()
+	case stageApplyOrReview:
+		return m.viewApplyOrReview()
+	case stageCategoryReview:
+		return m.viewCategoryReview()
 	default:
 		return m.viewMenu()
 	}
@@ -226,8 +439,6 @@ func (m Model) viewLeft() string {
 
 // viewHints renders the help line constrained to maxWidth so it never
 // widens the box beyond the menu content.
-// Collapsed: only quit/back + "? more".
-// Expanded: all bindings on one line via ShortHelpView + "? less".
 func (m Model) viewHints(maxWidth int) string {
 	h := m.help
 	h.Width = maxWidth
@@ -235,15 +446,19 @@ func (m Model) viewHints(maxWidth int) string {
 	var bindings []key.Binding
 	if m.helpExpanded {
 		switch m.stage {
-		case stageUseCase:
+		case stageUseCase, stageApplyOrReview:
 			bindings = []key.Binding{keyNav, keyConfirm, keyBack, keyHelpLess}
+		case stageCategoryReview:
+			bindings = []key.Binding{keyNav, keyPageNav, keySelect, keyBack, keyHelpLess}
 		default:
 			bindings = []key.Binding{keyNav, keySelect, keyQuit, keyHelpLess}
 		}
 	} else {
 		switch m.stage {
-		case stageUseCase:
+		case stageUseCase, stageApplyOrReview:
 			bindings = []key.Binding{keyBack, keyHelpMore}
+		case stageCategoryReview:
+			bindings = []key.Binding{keyPageNav, keyBack, keyHelpMore}
 		default:
 			bindings = []key.Binding{keyQuit, keyHelpMore}
 		}
@@ -373,10 +588,76 @@ func (m Model) viewUseCase() string {
 			radio = radioOn
 			style = selectedStyle
 		}
-		b.WriteString(style.Render(radio + uc.String()))
+		b.WriteString(style.Render(radio+uc.String()) + "\n")
+		b.WriteString(mutedStyle.Render("  "+useCaseDescs[i]))
 		if i < len(useCaseOptions)-1 {
+			b.WriteString("\n\n")
+		}
+	}
+
+	return b.String()
+}
+
+func (m Model) viewApplyOrReview() string {
+	var b strings.Builder
+
+	b.WriteString(titleStyle.Render("boltx") + "\n")
+	b.WriteString(subtitleStyle.Render("How would you like to proceed?") + "\n\n")
+
+	uc := useCaseOptions[m.useCaseCursor]
+	b.WriteString(mutedStyle.Render("Use case: ") + normalStyle.Render(uc.String()) + "\n\n")
+
+	for i, opt := range applyOrReviewOptions {
+		radio := radioOff
+		style := normalStyle
+		if m.applyOrReviewCursor == i {
+			radio = radioOn
+			style = selectedStyle
+		}
+		b.WriteString(style.Render(radio + opt))
+		if i < len(applyOrReviewOptions)-1 {
 			b.WriteString("\n")
 		}
+	}
+
+	return b.String()
+}
+
+func (m Model) viewCategoryReview() string {
+	var b strings.Builder
+
+	page := m.categoryPages[m.paginator.Page]
+
+	b.WriteString(titleStyle.Render("boltx") + "\n")
+	b.WriteString(subtitleStyle.Render("Review settings") + "\n\n")
+	b.WriteString(sectionStyle.Render(page.Name) + "\n\n")
+
+	for i, opt := range page.Options {
+		cursor := noCursorStr
+		itemStyle := normalStyle
+		if m.categoryPageCursor == i {
+			cursor = cursorStr
+			itemStyle = selectedStyle
+		}
+		radio := radioOff
+		if opt.Checked {
+			radio = radioOn
+		}
+		b.WriteString(cursor + itemStyle.Render(radio+opt.Label) + "\n")
+	}
+
+	b.WriteString("\n" + m.paginator.View())
+
+	// Confirm item only on the last page.
+	if m.paginator.OnLastPage() {
+		confirmIdx := len(page.Options)
+		cursor := noCursorStr
+		confirmStyle := normalStyle
+		if m.categoryPageCursor == confirmIdx {
+			cursor = cursorStr
+			confirmStyle = selectedStyle
+		}
+		b.WriteString("\n\n" + cursor + confirmStyle.Render("Confirm →"))
 	}
 
 	return b.String()

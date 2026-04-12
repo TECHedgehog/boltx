@@ -25,6 +25,8 @@ var (
 				Border(lipgloss.RoundedBorder()).
 				BorderForeground(muted)
 
+	sectionStyle = lipgloss.NewStyle().Bold(true).Foreground(white)
+
 	cursorStr   = "› "
 	noCursorStr = "  "
 	radioOn     = "● "
