@@ -14,11 +14,16 @@ var (
 	normalStyle   = lipgloss.NewStyle().Foreground(white)
 	mutedStyle    = lipgloss.NewStyle().Foreground(muted)
 	greenStyle    = lipgloss.NewStyle().Foreground(green)
-	helpStyle     = lipgloss.NewStyle().Foreground(muted)
 
 	boxStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(purple)
+
+	// infoTableBorderStyle wraps the right-column info table.
+	// Defined here so viewRight does not allocate a new style every frame.
+	infoTableBorderStyle = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(muted)
 
 	cursorStr   = "› "
 	noCursorStr = "  "

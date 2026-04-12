@@ -3,10 +3,24 @@ package ui
 import (
 	"strings"
 
+	"github.com/charmbracelet/bubbles/help"
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
+	bubblesTable "github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"boltx/internal/detect"
+)
+
+// Key bindings shared across stages.
+var (
+	keyNav      = key.NewBinding(key.WithKeys("up", "down", "k", "j"), key.WithHelp("↑↓/jk", "navigate"))
+	keySelect   = key.NewBinding(key.WithKeys("enter", " "), key.WithHelp("enter", "select"))
+	keyConfirm  = key.NewBinding(key.WithKeys("enter", " "), key.WithHelp("enter", "confirm"))
+	keyBack     = key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back"))
+	keyQuit     = key.NewBinding(key.WithKeys("q", "esc"), key.WithHelp("q", "quit"))
+	keyHelpMore = key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "more"))
+	keyHelpLess = key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "less"))
 )
 
 type stage int
@@ -33,8 +47,11 @@ type Model struct {
 	detecting     bool
 	spinner       spinner.Model
 	env           detect.Environment
-	osInfo        detect.OSInfo
+	osInfo        detect.OSInfo // reserved for Stage 3 (distro-specific commands)
 	useCaseCursor int
+	infoTable     bubblesTable.Model
+	help          help.Model
+	helpExpanded  bool
 }
 
 var menuItems = []string{
@@ -42,14 +59,24 @@ var menuItems = []string{
 	"Quit",
 }
 
+var useCaseOptions = []detect.UseCase{detect.UseCaseVPS, detect.UseCaseDevMachine}
+
 // NewModel returns the initial model.
 func NewModel() Model {
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(purple)
+
+	h := help.New()
+	h.Styles.ShortKey = lipgloss.NewStyle().Foreground(white)
+	h.Styles.ShortDesc = lipgloss.NewStyle().Foreground(muted)
+	h.Styles.ShortSeparator = lipgloss.NewStyle().Foreground(muted)
+	h.Styles.Ellipsis = lipgloss.NewStyle().Foreground(muted)
+
 	return Model{
 		detecting: true,
 		spinner:   s,
+		help:      h,
 	}
 }
 
@@ -85,11 +112,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.env = msg.env
 		m.osInfo = msg.osInfo
 		m.useCaseCursor = int(msg.env.SuggestedUseCase())
+		m.infoTable = buildInfoTable(msg.env, msg.osInfo)
 
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
+
+		case "?":
+			m.helpExpanded = !m.helpExpanded
 
 		case "q", "esc":
 			if m.stage == stageMenu {
@@ -116,7 +147,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.menuCursor++
 				}
 			case stageUseCase:
-				if !m.detecting && m.useCaseCursor < 1 {
+				if !m.detecting && m.useCaseCursor < len(useCaseOptions)-1 {
 					m.useCaseCursor++
 				}
 			}
@@ -147,7 +178,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // Right column: info table independently centered in the full column height.
 func (m Model) View() string {
 	leftMain := m.viewLeft()
-	hints := m.viewHints()
+	hints := m.viewHints(lipgloss.Width(leftMain))
 	rightContent := m.viewRight()
 
 	mainH := lipgloss.Height(leftMain)
@@ -193,31 +224,54 @@ func (m Model) viewLeft() string {
 	}
 }
 
-// viewHints returns the context-sensitive hint line shown at the bottom of the box.
-func (m Model) viewHints() string {
-	switch m.stage {
-	case stageUseCase:
-		return helpStyle.Render("↑↓/jk  navigate   enter  confirm   esc  back")
-	default:
-		return helpStyle.Render("↑↓/jk  navigate   enter  select   q  quit")
+// viewHints renders the help line constrained to maxWidth so it never
+// widens the box beyond the menu content.
+// Collapsed: only quit/back + "? more".
+// Expanded: all bindings on one line via ShortHelpView + "? less".
+func (m Model) viewHints(maxWidth int) string {
+	h := m.help
+	h.Width = maxWidth
+
+	var bindings []key.Binding
+	if m.helpExpanded {
+		switch m.stage {
+		case stageUseCase:
+			bindings = []key.Binding{keyNav, keyConfirm, keyBack, keyHelpLess}
+		default:
+			bindings = []key.Binding{keyNav, keySelect, keyQuit, keyHelpLess}
+		}
+	} else {
+		switch m.stage {
+		case stageUseCase:
+			bindings = []key.Binding{keyBack, keyHelpMore}
+		default:
+			bindings = []key.Binding{keyQuit, keyHelpMore}
+		}
 	}
+	return h.ShortHelpView(bindings)
 }
 
 // viewRight returns the system info table for the right column.
-// Uses lipgloss.Table for full border and row-divider support.
 // Shows an animated spinner while detection is running.
 func (m Model) viewRight() string {
 	if m.detecting {
 		return m.spinner.View()
 	}
-	return renderInfoTable(m.env, m.osInfo)
+	// bubbles/table always prepends a header line; drop it since we want no headers.
+	raw := m.infoTable.View()
+	if idx := strings.Index(raw, "\n"); idx >= 0 {
+		raw = raw[idx+1:]
+	}
+	return infoTableBorderStyle.Render(raw)
 }
 
-// renderInfoTable builds a bordered key-value table from detected system info.
-// Rendered manually with box-drawing characters so we have full control over
-// the outer border and row dividers. bubbles/table is reserved for future
-// interactive tables (lists, package selection, etc.).
-func renderInfoTable(env detect.Environment, osInfo detect.OSInfo) string {
+// buildInfoTable constructs a bubbles/table model from detected system info.
+// The table is built once when detection completes and stored on the Model.
+//
+// Rows must contain plain (uncolored) strings. bubbles/table internally calls
+// runewidth.Truncate on cell values before measuring; go-runewidth does not
+// strip ANSI, so pre-colored strings cause premature truncation.
+func buildInfoTable(env detect.Environment, osInfo detect.OSInfo) bubblesTable.Model {
 	type kv struct{ k, v string }
 	var data []kv
 
@@ -237,7 +291,9 @@ func renderInfoTable(env detect.Environment, osInfo detect.OSInfo) string {
 	}
 	data = append(data, kv{"IP", ipVal})
 
-	// Measure column widths from content (all keys/values are ASCII).
+	// Column widths derived from content only — the header row is stripped in
+	// viewRight, so its title strings don't set a meaningful floor.
+	// Padding(0,1) in the cell styles adds one space per side; no manual +2 needed.
 	maxK, maxV := 0, 0
 	for _, r := range data {
 		if len(r.k) > maxK {
@@ -248,29 +304,31 @@ func renderInfoTable(env detect.Environment, osInfo detect.OSInfo) string {
 		}
 	}
 
-	// Cell widths include one space of padding on each side.
-	kw := maxK + 2
-	vw := maxV + 2
-
-	top := mutedStyle.Render("┌" + strings.Repeat("─", kw) + "┬" + strings.Repeat("─", vw) + "┐")
-	mid := mutedStyle.Render("├" + strings.Repeat("─", kw) + "┼" + strings.Repeat("─", vw) + "┤")
-	bot := mutedStyle.Render("└" + strings.Repeat("─", kw) + "┴" + strings.Repeat("─", vw) + "┘")
-	pipe := mutedStyle.Render("│")
-
-	var lines []string
-	lines = append(lines, top)
-	for i, r := range data {
-		// Width() pads content to the column width so all rows are the same size.
-		keyCell := " " + mutedStyle.Width(maxK).Render(r.k) + " "
-		valCell := " " + normalStyle.Width(maxV).Render(r.v) + " "
-		lines = append(lines, pipe+keyCell+pipe+valCell+pipe)
-		if i < len(data)-1 {
-			lines = append(lines, mid)
-		}
+	cols := []bubblesTable.Column{
+		{Title: "Property", Width: maxK},
+		{Title: "Value", Width: maxV},
 	}
-	lines = append(lines, bot)
 
-	return strings.Join(lines, "\n")
+	rows := make([]bubblesTable.Row, len(data))
+	for i, r := range data {
+		rows[i] = bubblesTable.Row{r.k, r.v}
+	}
+
+	s := bubblesTable.Styles{
+		Header: lipgloss.NewStyle().Bold(true).Foreground(muted).Padding(0, 1),
+		Cell:   lipgloss.NewStyle().Foreground(white).Padding(0, 1),
+		// Selected wraps the entire already-cell-padded row, so no extra padding.
+		Selected: lipgloss.NewStyle().Foreground(white),
+	}
+
+	// WithHeight receives total lines including header; internally it subtracts
+	// the header height so the viewport fits exactly len(data) rows.
+	return bubblesTable.New(
+		bubblesTable.WithColumns(cols),
+		bubblesTable.WithRows(rows),
+		bubblesTable.WithHeight(len(data)+1),
+		bubblesTable.WithStyles(s),
+	)
 }
 
 func (m Model) viewMenu() string {
@@ -306,11 +364,9 @@ func (m Model) viewUseCase() string {
 		return b.String()
 	}
 
-	b.WriteString(mutedStyle.Render("Detected:  ") + normalStyle.Render(m.env.Virt.String()) + "\n")
 	b.WriteString(mutedStyle.Render("Suggested: ") + greenStyle.Render(m.env.SuggestedUseCase().String()) + "\n\n")
 
-	useCases := []detect.UseCase{detect.UseCaseVPS, detect.UseCaseDevMachine}
-	for i, uc := range useCases {
+	for i, uc := range useCaseOptions {
 		radio := radioOff
 		style := normalStyle
 		if m.useCaseCursor == i {
@@ -318,7 +374,7 @@ func (m Model) viewUseCase() string {
 			style = selectedStyle
 		}
 		b.WriteString(style.Render(radio + uc.String()))
-		if i < len(useCases)-1 {
+		if i < len(useCaseOptions)-1 {
 			b.WriteString("\n")
 		}
 	}
