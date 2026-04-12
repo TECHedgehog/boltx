@@ -10,17 +10,36 @@ Early development — not usable yet.
 
 - [Bubbletea](https://github.com/charmbracelet/bubbletea) — TUI framework
 - [Lipgloss](https://github.com/charmbracelet/lipgloss) — terminal styling
+- [Bubbles](https://github.com/charmbracelet/bubbles) — UI components
 
 ## Roadmap
 
 - [x] Main menu
-- [ ] Use case detection (VPS vs dev machine)
+- [x] Use case detection (VPS vs dev machine)
 - [ ] Setup categories (firewall, SSH, users, packages...)
 - [ ] Per-category configuration steps
 - [ ] Apply changes
 
-## Run from source
+## Usage
+
+**Requirements:** Go 1.24+
+
+### Run without installing
 
 ```bash
 go run .
+```
+
+### Build a binary
+
+```bash
+go build -o boltx .
+./boltx
+```
+
+### Install to `$GOPATH/bin`
+
+```bash
+go install .
+boltx
 ```
