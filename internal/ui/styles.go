@@ -16,6 +16,12 @@ var (
 	greenStyle    = lipgloss.NewStyle().Foreground(green)
 	helpStyle     = lipgloss.NewStyle().Foreground(muted)
 
+	boxStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(purple)
+
 	cursorStr   = "› "
 	noCursorStr = "  "
+	radioOn     = "● "
+	radioOff    = "○ "
 )
