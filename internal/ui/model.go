@@ -20,8 +20,8 @@ var (
 	keyTabNav   = key.NewBinding(key.WithKeys("left", "right", "h", "l"), key.WithHelp("←→/hl", "tab"))
 	keySelect   = key.NewBinding(key.WithKeys("enter", " "), key.WithHelp("enter/space", "toggle"))
 	keyConfirm  = key.NewBinding(key.WithKeys("enter", " "), key.WithHelp("enter", "confirm"))
-	keyBack     = key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back"))
-	keyQuit     = key.NewBinding(key.WithKeys("q", "esc"), key.WithHelp("q", "quit"))
+	keyBack     = key.NewBinding(key.WithKeys("q", "esc"), key.WithHelp("q/esc", "back"))
+	keyQuit     = key.NewBinding(key.WithKeys("q", "esc"), key.WithHelp("q/esc", "quit"))
 	keyHelpMore = key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "more"))
 	keyHelpLess = key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "less"))
 )
@@ -169,6 +169,9 @@ func NewModel() Model {
 	h.Styles.ShortDesc = lipgloss.NewStyle().Foreground(muted)
 	h.Styles.ShortSeparator = lipgloss.NewStyle().Foreground(muted)
 	h.Styles.Ellipsis = lipgloss.NewStyle().Foreground(muted)
+	h.Styles.FullKey = lipgloss.NewStyle().Foreground(white)
+	h.Styles.FullDesc = lipgloss.NewStyle().Foreground(muted)
+	h.Styles.FullSeparator = lipgloss.NewStyle().Foreground(muted)
 
 	return Model{
 		detecting: true,
@@ -405,6 +408,10 @@ func computeLayout(m Model) Model {
 }
 
 // View builds the two-column layout centered in the terminal.
+//
+// When the left column content is taller than the info table, the lines that
+// would sit beside blank right-column space instead flow below the table,
+// spanning the full inner width of the box so no space is wasted.
 func (m Model) View() string {
 	leftMain := m.viewLeft()
 
@@ -413,19 +420,50 @@ func (m Model) View() string {
 		leftW = lipgloss.Width(leftMain)
 	}
 
-	hints := m.viewHints(leftW)
 	rightContent := m.viewRight()
 
 	const topPad = 1
-	leftMainBlock := lipgloss.NewStyle().
-		Width(leftW).
-		Render(strings.Repeat("\n", topPad) + leftMain)
-	leftBlock := lipgloss.JoinVertical(lipgloss.Left, leftMainBlock, hints)
-	leftCol := lipgloss.NewStyle().PaddingLeft(2).PaddingRight(1).Render(leftBlock)
+	paddedLeft := strings.Repeat("\n", topPad) + leftMain
 
-	rightCol := lipgloss.NewStyle().PaddingTop(0).PaddingLeft(1).PaddingRight(1).Render(rightContent)
+	// leftCol outer = leftW + PaddingLeft(2) + PaddingRight(1) = leftW + 3
+	// rightCol outer = rightContentW + PaddingLeft(1) + PaddingRight(1) = rightContentW + 2
+	// total inner (inside box border) = leftW + rightContentW + 5
+	// bottom content width = total inner - PaddingLeft(2) - PaddingRight(1) = leftW + rightContentW + 2
+	bottomContentW := leftW + m.rightContentW + 2
 
-	box := boxStyle.Render(lipgloss.JoinHorizontal(lipgloss.Top, leftCol, rightCol))
+	leftH := lipgloss.Height(paddedLeft)
+	rightH := m.rightContentH // 0 until detection completes
+
+	var box string
+	if m.rightContentW > 0 && leftH > rightH {
+		// Overflow layout: first rightH lines sit beside the table; the rest
+		// flow below it at full inner width.
+		leftLines := strings.Split(paddedLeft, "\n")
+		topLeft := strings.Join(leftLines[:rightH], "\n")
+		bottomLeft := strings.Join(leftLines[rightH:], "\n")
+
+		topLeftCol := lipgloss.NewStyle().PaddingLeft(2).PaddingRight(1).
+			Render(lipgloss.NewStyle().Width(leftW).Render(topLeft))
+		topRightCol := lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1).
+			Render(rightContent)
+		topRow := lipgloss.JoinHorizontal(lipgloss.Top, topLeftCol, topRightCol)
+
+		hints := m.viewHints(bottomContentW)
+		bottomBlock := lipgloss.NewStyle().
+			Width(bottomContentW).
+			PaddingLeft(2).PaddingRight(1).
+			Render(bottomLeft + hints)
+
+		box = boxStyle.Render(lipgloss.JoinVertical(lipgloss.Left, topRow, bottomBlock))
+	} else {
+		// Normal layout: both columns side by side.
+		hints := m.viewHints(leftW)
+		leftMainBlock := lipgloss.NewStyle().Width(leftW).Render(paddedLeft)
+		leftBlock := lipgloss.JoinVertical(lipgloss.Left, leftMainBlock, hints)
+		leftCol := lipgloss.NewStyle().PaddingLeft(2).PaddingRight(1).Render(leftBlock)
+		rightCol := lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1).Render(rightContent)
+		box = boxStyle.Render(lipgloss.JoinHorizontal(lipgloss.Top, leftCol, rightCol))
+	}
 
 	if m.width > 0 && m.height > 0 {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Top,
@@ -453,25 +491,36 @@ func (m Model) viewHints(maxWidth int) string {
 	h := m.help
 	h.Width = maxWidth
 
-	var bindings []key.Binding
 	if m.helpExpanded {
+		if m.stage == stageCategoryReview {
+			// Three columns: navigation | actions | meta — max 2 rows total.
+			groups := [][]key.Binding{
+				{keyNav, keyTabNav},
+				{keySelect, keyBack},
+				{keyHelpLess},
+			}
+			return "\n\n" + h.FullHelpView(groups)
+		}
+		// All other stages: single line using the full box width so it doesn't truncate.
+		h.Width = m.leftColW + m.rightContentW + 2
+		var bindings []key.Binding
 		switch m.stage {
 		case stageUseCase, stageApplyOrReview:
 			bindings = []key.Binding{keyNav, keyConfirm, keyBack, keyHelpLess}
-		case stageCategoryReview:
-			bindings = []key.Binding{keyNav, keyTabNav, keySelect, keyBack, keyHelpLess}
-		default:
-			bindings = []key.Binding{keyNav, keySelect, keyQuit, keyHelpLess}
+		default: // stageMenu
+			bindings = []key.Binding{keyNav, keyConfirm, keyQuit, keyHelpLess}
 		}
-	} else {
-		switch m.stage {
-		case stageUseCase, stageApplyOrReview:
-			bindings = []key.Binding{keyBack, keyHelpMore}
-		case stageCategoryReview:
-			bindings = []key.Binding{keyTabNav, keyBack, keyHelpMore}
-		default:
-			bindings = []key.Binding{keyQuit, keyHelpMore}
-		}
+		return "\n\n" + h.ShortHelpView(bindings)
+	}
+
+	var bindings []key.Binding
+	switch m.stage {
+	case stageUseCase, stageApplyOrReview:
+		bindings = []key.Binding{keyBack, keyHelpMore}
+	case stageCategoryReview:
+		bindings = []key.Binding{keyBack, keyHelpMore}
+	default:
+		bindings = []key.Binding{keyQuit, keyHelpMore}
 	}
 	return "\n\n" + h.ShortHelpView(bindings)
 }
@@ -554,7 +603,7 @@ func (m Model) viewMenu() string {
 	var b strings.Builder
 
 	b.WriteString(titleStyle.Render("boltx") + "\n")
-	b.WriteString(subtitleStyle.Render("Linux setup tool") + "\n\n")
+	b.WriteString(subtitleStyle.Render("Easy first setup... and FAST!") + "\n\n")
 
 	for i, item := range menuItems {
 		cursor := noCursorStr
@@ -583,8 +632,11 @@ func (m Model) viewUseCase() string {
 		return b.String()
 	}
 
-	b.WriteString(mutedStyle.Render("Suggested: ") + greenStyle.Render(m.env.SuggestedUseCase().String()) + "\n\n")
-
+	suggested := m.env.SuggestedUseCase()
+	colW := m.leftColW
+	if colW == 0 {
+		colW = 40
+	}
 	for i, uc := range useCaseOptions {
 		radio := radioOff
 		style := normalStyle
@@ -592,8 +644,12 @@ func (m Model) viewUseCase() string {
 			radio = radioOn
 			style = selectedStyle
 		}
-		b.WriteString(style.Render(radio+uc.String()) + "\n")
-		b.WriteString(mutedStyle.Render("  " + useCaseDescs[i]))
+		line := style.Render(radio + uc.String())
+		if detect.UseCase(i) == suggested {
+			line += " " + greenStyle.Render("(Suggested)")
+		}
+		b.WriteString(line + "\n")
+		b.WriteString(renderOptionLine("  ", "", useCaseDescs[i], mutedStyle, colW))
 		if i < len(useCaseOptions)-1 {
 			b.WriteString("\n\n")
 		}
