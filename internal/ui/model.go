@@ -1,22 +1,23 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
+
+	"boltx/internal/detect"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/paginator"
 	"github.com/charmbracelet/bubbles/spinner"
 	bubblesTable "github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"boltx/internal/detect"
 )
 
 // Key bindings shared across stages.
 var (
 	keyNav      = key.NewBinding(key.WithKeys("up", "down", "k", "j"), key.WithHelp("↑↓/jk", "navigate"))
-	keyPageNav  = key.NewBinding(key.WithKeys("left", "right", "h", "l"), key.WithHelp("←→/hl", "page"))
+	keyTabNav   = key.NewBinding(key.WithKeys("left", "right", "h", "l"), key.WithHelp("←→/hl", "tab"))
 	keySelect   = key.NewBinding(key.WithKeys("enter", " "), key.WithHelp("enter/space", "toggle"))
 	keyConfirm  = key.NewBinding(key.WithKeys("enter", " "), key.WithHelp("enter", "confirm"))
 	keyBack     = key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back"))
@@ -25,10 +26,14 @@ var (
 	keyHelpLess = key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "less"))
 )
 
+// maxOptionsPerPage is the maximum number of options shown per tab sub-page.
+// When a category has more options than this, it gains extra sub-pages.
+const maxOptionsPerPage = 8
+
 type stage int
 
 const (
-	stageMenu           stage = iota
+	stageMenu stage = iota
 	stageUseCase
 	stageApplyOrReview
 	stageCategoryReview
@@ -44,6 +49,14 @@ type CategoryOption struct {
 type CategoryPage struct {
 	Name    string
 	Options []CategoryOption
+}
+
+// subPageCount returns the number of sub-pages needed for nOptions.
+func subPageCount(nOptions int) int {
+	if nOptions == 0 {
+		return 1
+	}
+	return (nOptions + maxOptionsPerPage - 1) / maxOptionsPerPage
 }
 
 // buildCategoryPages returns all category pages with defaults pre-filled for the given use case.
@@ -114,18 +127,16 @@ type Model struct {
 	applyOrReviewCursor int
 
 	// stageCategoryReview
-	paginator          paginator.Model
 	categoryPages      []CategoryPage
-	categoryPageCursor int
+	activeTab          int // which category tab is visible
+	tabSubPage         int // sub-page within the active tab (for overflow)
+	categoryPageCursor int // cursor position within the current sub-page
 
-	// Fixed layout — computed once after detection and terminal size are both known.
-	// leftColW and fixedH never change after layoutReady is set, keeping the box
-	// stable as the user navigates between screens.
-	rightContentW int  // measured width of the rendered info table (set after detection)
-	rightContentH int  // measured height of the rendered info table
-	leftColW      int  // left column content width (wraps text that exceeds it)
-	fixedH        int  // fixed content-area height for both columns
-	layoutReady   bool // true once leftColW and fixedH have been locked in
+	// Layout — recomputed on every terminal resize and after detection completes.
+	rightContentW int // measured width of the rendered info table (set after detection)
+	rightContentH int // measured height of the rendered info table (set after detection)
+	leftColW      int // left column content width; lipgloss wraps anything wider
+	stableTop     int // vertical offset of the box, fixed per window size so box grows downward
 }
 
 var menuItems = []string{
@@ -159,16 +170,10 @@ func NewModel() Model {
 	h.Styles.ShortSeparator = lipgloss.NewStyle().Foreground(muted)
 	h.Styles.Ellipsis = lipgloss.NewStyle().Foreground(muted)
 
-	p := paginator.New()
-	p.Type = paginator.Dots
-	p.ActiveDot = lipgloss.NewStyle().Foreground(purple).Render("•")
-	p.InactiveDot = lipgloss.NewStyle().Foreground(muted).Render("◦")
-
 	return Model{
 		detecting: true,
 		spinner:   s,
 		help:      h,
-		paginator: p,
 	}
 }
 
@@ -234,19 +239,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.stage = stageUseCase
 			case stageCategoryReview:
 				m.stage = stageApplyOrReview
-				m.paginator.Page = 0
+				m.activeTab = 0
+				m.tabSubPage = 0
 				m.categoryPageCursor = 0
 			}
 
 		case "left", "h":
-			if m.stage == stageCategoryReview {
-				m.paginator.PrevPage()
+			if m.stage == stageCategoryReview && m.activeTab > 0 {
+				m.activeTab--
+				m.tabSubPage = 0
 				m.categoryPageCursor = 0
 			}
 
 		case "right", "l":
-			if m.stage == stageCategoryReview && !m.paginator.OnLastPage() {
-				m.paginator.NextPage()
+			if m.stage == stageCategoryReview && m.activeTab < len(m.categoryPages)-1 {
+				m.activeTab++
+				m.tabSubPage = 0
 				m.categoryPageCursor = 0
 			}
 
@@ -267,6 +275,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case stageCategoryReview:
 				if m.categoryPageCursor > 0 {
 					m.categoryPageCursor--
+				} else if m.tabSubPage > 0 {
+					// Wrap back to the last option on the previous sub-page.
+					m.tabSubPage--
+					curPage := m.categoryPages[m.activeTab]
+					prevStart := m.tabSubPage * maxOptionsPerPage
+					prevEnd := min(prevStart+maxOptionsPerPage, len(curPage.Options))
+					m.categoryPageCursor = prevEnd - prevStart - 1
 				}
 			}
 
@@ -285,14 +300,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.applyOrReviewCursor++
 				}
 			case stageCategoryReview:
-				curPage := m.categoryPages[m.paginator.Page]
-				// On the last page, cursor can reach a "Confirm →" item beyond the options.
-				maxCursor := len(curPage.Options) - 1
-				if m.paginator.OnLastPage() {
+				curPage := m.categoryPages[m.activeTab]
+				nSub := subPageCount(len(curPage.Options))
+				startIdx := m.tabSubPage * maxOptionsPerPage
+				endIdx := min(startIdx+maxOptionsPerPage, len(curPage.Options))
+				subPageLen := endIdx - startIdx
+				isLastTab := m.activeTab == len(m.categoryPages)-1
+				isLastSub := m.tabSubPage == nSub-1
+				// Confirm → counts as one extra cursor position on the last tab+subpage.
+				maxCursor := subPageLen - 1
+				if isLastTab && isLastSub {
 					maxCursor++
 				}
 				if m.categoryPageCursor < maxCursor {
 					m.categoryPageCursor++
+				} else if !isLastSub {
+					// Auto-advance to the next sub-page.
+					m.tabSubPage++
+					m.categoryPageCursor = 0
 				}
 			}
 
@@ -310,8 +335,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// Build category pages here so changes survive a back/forward trip
 					// between stageApplyOrReview and stageCategoryReview.
 					m.categoryPages = buildCategoryPages(useCaseOptions[m.useCaseCursor])
-					m.paginator.SetTotalPages(len(m.categoryPages))
-					m.paginator.Page = 0
+					m.activeTab = 0
+					m.tabSubPage = 0
 					m.categoryPageCursor = 0
 					m.applyOrReviewCursor = 0
 					m.stage = stageApplyOrReview
@@ -321,16 +346,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case 0:
 					// Apply recommended — Stage 5: run processes (not yet built)
 				case 1:
-					m.paginator.Page = 0
+					m.activeTab = 0
+					m.tabSubPage = 0
 					m.categoryPageCursor = 0
 					m.stage = stageCategoryReview
 				}
 			case stageCategoryReview:
-				curPage := m.categoryPages[m.paginator.Page]
-				if m.categoryPageCursor < len(curPage.Options) {
-					m.categoryPages[m.paginator.Page].Options[m.categoryPageCursor].Checked =
-						!m.categoryPages[m.paginator.Page].Options[m.categoryPageCursor].Checked
-				} else if m.paginator.OnLastPage() {
+				curPage := m.categoryPages[m.activeTab]
+				startIdx := m.tabSubPage * maxOptionsPerPage
+				endIdx := min(startIdx+maxOptionsPerPage, len(curPage.Options))
+				subPageLen := endIdx - startIdx
+				if m.categoryPageCursor < subPageLen {
+					absIdx := startIdx + m.categoryPageCursor
+					m.categoryPages[m.activeTab].Options[absIdx].Checked =
+						!m.categoryPages[m.activeTab].Options[absIdx].Checked
+				} else {
 					// Confirm → Stage 5 not yet built
 				}
 			}
@@ -340,43 +370,44 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// computeLayout locks in leftColW and fixedH the first time both the terminal
-// size and the right column measurement are available. After that it is a no-op,
-// so the box dimensions never change as the user navigates.
+// computeLayout sets leftColW and stableTop whenever both the terminal size
+// and the right-column measurement are available.
 //
-// Box width equation:
+// leftColW is content-driven: capped at maxLeftW so the box is no wider than
+// the content needs, with a screen-driven floor so it never overflows narrow
+// terminals.
 //
-//	border(2) + leftPad(6) + leftColW + rightPad(4) + rightContentW = targetBoxW
-//	→ leftColW = targetBoxW − rightContentW − 12
-//
-// fixedH covers the tallest possible left-column content (Packages page ≈ 16 lines).
+// stableTop is the number of blank lines above the box. It is computed once
+// from the terminal height and a worst-case box height (tallestBoxH) so the
+// box always starts high enough that even the longest tab page fits without
+// pushing the bottom edge past the terminal, which would look like movement.
 func computeLayout(m Model) Model {
-	if m.layoutReady || m.width == 0 || m.rightContentW == 0 {
+	if m.width == 0 || m.rightContentW == 0 {
 		return m
 	}
-	targetBoxW := m.width - 4 // 2-char margin each side
-	if targetBoxW > 96 {
-		targetBoxW = 96
+	// Content-driven left column width.
+	// Widest left content: "  ○ Disable password authentication" = 35 chars.
+	// Cap at 40: bordered tabs with Padding(0,1) peak at 39 chars wide
+	// (▫ + SSH hardening + Users + Packages) and need 1 char of headroom.
+	const maxLeftW = 40
+	screenLeftW := m.width - 4 - m.rightContentW - 8
+	m.leftColW = max(min(maxLeftW, screenLeftW), 28)
+
+	// Stable vertical anchor.
+	// tallestBoxH covers the Packages tab (15 content lines) + topPad (1) +
+	// hints (3) + border (2) = 21, rounded up to 23 for the wider tab bar.
+	if m.rightContentH > 0 {
+		const tallestBoxH = 23
+		refBoxH := max(m.rightContentH+6, tallestBoxH)
+		m.stableTop = max(0, (m.height-refBoxH)/2)
 	}
-	if targetBoxW < 72 {
-		targetBoxW = 72
-	}
-	m.leftColW = max(targetBoxW-m.rightContentW-12, 28)
-	// 16 = tallest left content (Packages page with Confirm item)
-	m.fixedH = max(16, m.rightContentH) + 2
-	m.layoutReady = true
 	return m
 }
 
 // View builds the two-column layout centered in the terminal.
-//
-// Left column:  interactive content vertically centered, hints pinned at bottom.
-// Right column: info table independently centered in the full column height.
 func (m Model) View() string {
 	leftMain := m.viewLeft()
 
-	// Use the locked-in width once available; fall back to content width during
-	// the brief detection spinner phase before layoutReady is set.
 	leftW := m.leftColW
 	if leftW == 0 {
 		leftW = lipgloss.Width(leftMain)
@@ -385,40 +416,20 @@ func (m Model) View() string {
 	hints := m.viewHints(leftW)
 	rightContent := m.viewRight()
 
-	hintsH := lipgloss.Height(hints)
-
-	// Use the locked-in content height once available; fall back to adaptive.
-	contentH := m.fixedH
-	if contentH == 0 {
-		mainH := lipgloss.Height(leftMain)
-		rightH := lipgloss.Height(rightContent)
-		contentH = max(mainH, rightH) + 2
-	}
-	totalH := contentH + hintsH
-
-	// Left column: content wrapped and centered inside the fixed width × height.
-	// Width(leftW) causes lipgloss to soft-wrap any line that exceeds leftW,
-	// keeping the box from growing wider as the user moves between screens.
-	centeredLeft := lipgloss.NewStyle().
+	const topPad = 1
+	leftMainBlock := lipgloss.NewStyle().
 		Width(leftW).
-		Height(contentH).
-		Align(lipgloss.Left, lipgloss.Center).
-		Render(leftMain)
-	leftBlock := lipgloss.JoinVertical(lipgloss.Left, centeredLeft, hints)
-	leftCol := lipgloss.NewStyle().Padding(0, 3).Render(leftBlock)
+		Render(strings.Repeat("\n", topPad) + leftMain)
+	leftBlock := lipgloss.JoinVertical(lipgloss.Left, leftMainBlock, hints)
+	leftCol := lipgloss.NewStyle().PaddingLeft(2).PaddingRight(1).Render(leftBlock)
 
-	// Right column: table independently centered in totalH.
-	// Horizontal padding only — vertical padding would break JoinHorizontal.
-	centeredRight := lipgloss.NewStyle().
-		Height(totalH).
-		Align(lipgloss.Left, lipgloss.Center).
-		Render(rightContent)
-	rightCol := lipgloss.NewStyle().Padding(0, 2).Render(centeredRight)
+	rightCol := lipgloss.NewStyle().PaddingTop(0).PaddingLeft(1).PaddingRight(1).Render(rightContent)
 
 	box := boxStyle.Render(lipgloss.JoinHorizontal(lipgloss.Top, leftCol, rightCol))
 
 	if m.width > 0 && m.height > 0 {
-		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Top,
+			strings.Repeat("\n", m.stableTop)+box)
 	}
 	return box
 }
@@ -437,8 +448,7 @@ func (m Model) viewLeft() string {
 	}
 }
 
-// viewHints renders the help line constrained to maxWidth so it never
-// widens the box beyond the menu content.
+// viewHints renders the help line constrained to maxWidth.
 func (m Model) viewHints(maxWidth int) string {
 	h := m.help
 	h.Width = maxWidth
@@ -449,7 +459,7 @@ func (m Model) viewHints(maxWidth int) string {
 		case stageUseCase, stageApplyOrReview:
 			bindings = []key.Binding{keyNav, keyConfirm, keyBack, keyHelpLess}
 		case stageCategoryReview:
-			bindings = []key.Binding{keyNav, keyPageNav, keySelect, keyBack, keyHelpLess}
+			bindings = []key.Binding{keyNav, keyTabNav, keySelect, keyBack, keyHelpLess}
 		default:
 			bindings = []key.Binding{keyNav, keySelect, keyQuit, keyHelpLess}
 		}
@@ -458,12 +468,12 @@ func (m Model) viewHints(maxWidth int) string {
 		case stageUseCase, stageApplyOrReview:
 			bindings = []key.Binding{keyBack, keyHelpMore}
 		case stageCategoryReview:
-			bindings = []key.Binding{keyPageNav, keyBack, keyHelpMore}
+			bindings = []key.Binding{keyTabNav, keyBack, keyHelpMore}
 		default:
 			bindings = []key.Binding{keyQuit, keyHelpMore}
 		}
 	}
-	return h.ShortHelpView(bindings)
+	return "\n\n" + h.ShortHelpView(bindings)
 }
 
 // viewRight returns the system info table for the right column.
@@ -506,9 +516,6 @@ func buildInfoTable(env detect.Environment, osInfo detect.OSInfo) bubblesTable.M
 	}
 	data = append(data, kv{"IP", ipVal})
 
-	// Column widths derived from content only — the header row is stripped in
-	// viewRight, so its title strings don't set a meaningful floor.
-	// Padding(0,1) in the cell styles adds one space per side; no manual +2 needed.
 	maxK, maxV := 0, 0
 	for _, r := range data {
 		if len(r.k) > maxK {
@@ -530,14 +537,11 @@ func buildInfoTable(env detect.Environment, osInfo detect.OSInfo) bubblesTable.M
 	}
 
 	s := bubblesTable.Styles{
-		Header: lipgloss.NewStyle().Bold(true).Foreground(muted).Padding(0, 1),
-		Cell:   lipgloss.NewStyle().Foreground(white).Padding(0, 1),
-		// Selected wraps the entire already-cell-padded row, so no extra padding.
+		Header:   lipgloss.NewStyle().Bold(true).Foreground(muted).Padding(0, 1),
+		Cell:     lipgloss.NewStyle().Foreground(white).Padding(0, 1),
 		Selected: lipgloss.NewStyle().Foreground(white),
 	}
 
-	// WithHeight receives total lines including header; internally it subtracts
-	// the header height so the viewport fits exactly len(data) rows.
 	return bubblesTable.New(
 		bubblesTable.WithColumns(cols),
 		bubblesTable.WithRows(rows),
@@ -589,7 +593,7 @@ func (m Model) viewUseCase() string {
 			style = selectedStyle
 		}
 		b.WriteString(style.Render(radio+uc.String()) + "\n")
-		b.WriteString(mutedStyle.Render("  "+useCaseDescs[i]))
+		b.WriteString(mutedStyle.Render("  " + useCaseDescs[i]))
 		if i < len(useCaseOptions)-1 {
 			b.WriteString("\n\n")
 		}
@@ -626,13 +630,25 @@ func (m Model) viewApplyOrReview() string {
 func (m Model) viewCategoryReview() string {
 	var b strings.Builder
 
-	page := m.categoryPages[m.paginator.Page]
-
 	b.WriteString(titleStyle.Render("boltx") + "\n")
 	b.WriteString(subtitleStyle.Render("Review settings") + "\n\n")
-	b.WriteString(sectionStyle.Render(page.Name) + "\n\n")
 
-	for i, opt := range page.Options {
+	// Tab bar — the tabs' bottom borders form the visual separator, so no
+	// explicit separator line is needed. One blank line follows for spacing.
+	b.WriteString(m.viewTabBar() + "\n\n")
+	colW := m.leftColW
+	if colW == 0 {
+		colW = 40
+	}
+
+	// Options for the current tab and sub-page.
+	page := m.categoryPages[m.activeTab]
+	nSub := subPageCount(len(page.Options))
+	startIdx := m.tabSubPage * maxOptionsPerPage
+	endIdx := min(startIdx+maxOptionsPerPage, len(page.Options))
+	subOpts := page.Options[startIdx:endIdx]
+
+	for i, opt := range subOpts {
 		cursor := noCursorStr
 		itemStyle := normalStyle
 		if m.categoryPageCursor == i {
@@ -643,22 +659,99 @@ func (m Model) viewCategoryReview() string {
 		if opt.Checked {
 			radio = radioOn
 		}
-		b.WriteString(cursor + itemStyle.Render(radio+opt.Label) + "\n")
+		b.WriteString(renderOptionLine(cursor, radio, opt.Label, itemStyle, colW) + "\n")
 	}
 
-	b.WriteString("\n" + m.paginator.View())
-
-	// Confirm item only on the last page.
-	if m.paginator.OnLastPage() {
-		confirmIdx := len(page.Options)
+	// Confirm → on the last tab's last sub-page.
+	isLastTab := m.activeTab == len(m.categoryPages)-1
+	isLastSub := m.tabSubPage == nSub-1
+	if isLastTab && isLastSub {
+		confirmIdx := len(subOpts)
 		cursor := noCursorStr
-		confirmStyle := normalStyle
+		cStyle := normalStyle
 		if m.categoryPageCursor == confirmIdx {
 			cursor = cursorStr
-			confirmStyle = selectedStyle
+			cStyle = selectedStyle
 		}
-		b.WriteString("\n\n" + cursor + confirmStyle.Render("Confirm →"))
+		b.WriteString("\n" + cursor + cStyle.Render("Confirm →"))
 	}
 
 	return b.String()
+}
+
+// viewTabBar renders the horizontal tab strip for the category review stage.
+// The active tab and each of its immediate neighbours (up to one on each side)
+// are shown with their full label inside a bordered box. All other tabs are
+// collapsed to a centred "▫" glyph that occupies the same 3-line height so
+// JoinHorizontal aligns it with the label row of the bordered tabs.
+func (m Model) viewTabBar() string {
+	parts := make([]string, len(m.categoryPages))
+	for i, page := range m.categoryPages {
+		dist := m.activeTab - i
+		if dist < 0 {
+			dist = -dist
+		}
+		switch {
+		case dist == 0:
+			label := page.Name
+			n := subPageCount(len(page.Options))
+			if n > 1 {
+				label = fmt.Sprintf("%s %d/%d", page.Name, m.tabSubPage+1, n)
+			}
+			parts[i] = activeTabStyle.Render(label)
+		case dist == 1:
+			parts[i] = inactiveTabStyle.Render(page.Name)
+		default:
+			// 3-line block, ▫ vertically centred → aligns with the label row.
+			// PaddingLeft(1) keeps a small gap from the adjacent bordered tab.
+			parts[i] = lipgloss.NewStyle().
+				Height(3).
+				PaddingLeft(1).
+				Foreground(muted).
+				Align(lipgloss.Left, lipgloss.Center).
+				Render("▫")
+		}
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, parts...)
+}
+
+// renderOptionLine renders one option row with word-wrap when the label is
+// too wide for maxWidth. Continuation lines are indented to align with the
+// first character of the label text.
+func renderOptionLine(cursor, radio, label string, style lipgloss.Style, maxWidth int) string {
+	prefix := cursor + radio // e.g. "  ○ " — 4 plain ASCII chars
+	prefixW := len(prefix)
+	if prefixW+len(label) <= maxWidth {
+		return prefix + style.Render(label)
+	}
+	availW := maxWidth - prefixW
+	indent := strings.Repeat(" ", prefixW)
+	words := strings.Fields(label)
+	var lines []string
+	cur := ""
+	for _, w := range words {
+		switch {
+		case cur == "":
+			cur = w
+		case len(cur)+1+len(w) <= availW:
+			cur += " " + w
+		default:
+			lines = append(lines, cur)
+			cur = w
+		}
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	var sb strings.Builder
+	for i, line := range lines {
+		if i > 0 {
+			sb.WriteByte('\n')
+			sb.WriteString(indent)
+		} else {
+			sb.WriteString(prefix)
+		}
+		sb.WriteString(style.Render(line))
+	}
+	return sb.String()
 }
