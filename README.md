@@ -55,3 +55,7 @@ go build -o boltx .
 go install .
 boltx
 ```
+
+## Support
+
+If you find this useful, consider buying me a coffee: [ko-fi.com/ericllaca](https://ko-fi.com/ericllaca)
