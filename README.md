@@ -12,12 +12,12 @@ The review screen is organised into tabs:
 
 | Tab | Description |
 |-----|-------------|
-| Authentication & Access | SSH keys, PAM, sudo rules |
-| Security & Hardening | Root login, password auth, kernel hardening |
-| System & Packages | Essential packages and package manager config |
-| User Environment | User creation, shell, dotfiles |
-| Networking & Services | Firewall, ports, DNS |
-| System Configuration | Hostname, locale, NTP |
+| Authentication & Access | Users (sudo, groups, etc), SSH setup |
+| Security & Hardening | Firewall setup (ufw), fail2ban, policies |
+| System & Packages | Update/Upgrade, Essential pkgs, cleanup/maintenance |
+| User Environment | shell, omz, dotfiles, aliases, env |
+| Networking & Services | Web servers (i.e. cockpit), Proxy managers (traefik, nginx) |
+| System Configuration | Hostname, locale, Timezone |
 | Review & Apply | Summary and final apply step |
 
 ## Built with
