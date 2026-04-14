@@ -389,10 +389,11 @@ func computeLayout(m Model) Model {
 		return m
 	}
 	// Content-driven left column width.
-	// Widest left content: "  ○ Disable password authentication" = 35 chars.
-	// Cap at 40: bordered tabs with Padding(0,1) peak at 39 chars wide
-	// (▫ + SSH hardening + Users + Packages) and need 1 char of headroom.
-	const maxLeftW = 40
+	// Binding constraints (both hit 35 chars):
+	//   "● Dev machine / Test VM (Suggested)"  → 2+21+1+11 = 35
+	//   "  ○ Disable password authentication"   → 2+2+31   = 35
+	// Tab bar peaks at 29 chars ("SSH hardening" active + 3 ghost tabs × 4).
+	const maxLeftW = 35
 	screenLeftW := m.width - 4 - m.rightContentW - 8
 	m.leftColW = max(min(maxLeftW, screenLeftW), 28)
 
@@ -435,7 +436,29 @@ func (m Model) View() string {
 	rightH := m.rightContentH // 0 until detection completes
 
 	var box string
-	if m.rightContentW > 0 && leftH > rightH {
+	switch {
+	case m.stage == stageCategoryReview && m.rightContentW > 0:
+		// Category-review layout: title + tab bar sit beside the info table as a
+		// header block. A full-width separator line divides them from the options
+		// below, which span the full inner width.
+		aboveSep := strings.Repeat("\n", topPad) + m.viewCategoryReviewAboveSep()
+		leftAboveBlock := lipgloss.NewStyle().Width(leftW).Render(aboveSep)
+		leftAboveCol := lipgloss.NewStyle().PaddingLeft(2).PaddingRight(1).Render(leftAboveBlock)
+		rightAboveCol := lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1).Render(rightContent)
+		headerRow := lipgloss.JoinHorizontal(lipgloss.Top, leftAboveCol, rightAboveCol)
+
+		separatorRow := mutedStyle.Render(strings.Repeat("─", lipgloss.Width(headerRow)))
+
+		body := m.viewCategoryReviewBody(bottomContentW)
+		hints := m.viewHints(bottomContentW)
+		bodyBlock := lipgloss.NewStyle().
+			Width(bottomContentW).
+			PaddingLeft(2).PaddingRight(1).
+			Render(body + hints)
+
+		box = boxStyle.Render(lipgloss.JoinVertical(lipgloss.Left, headerRow, separatorRow, bodyBlock))
+
+	case m.rightContentW > 0 && leftH > rightH:
 		// Overflow layout: first rightH lines sit beside the table; the rest
 		// flow below it at full inner width.
 		leftLines := strings.Split(paddedLeft, "\n")
@@ -455,8 +478,33 @@ func (m Model) View() string {
 			Render(bottomLeft + hints)
 
 		box = boxStyle.Render(lipgloss.JoinVertical(lipgloss.Left, topRow, bottomBlock))
-	} else {
-		// Normal layout: both columns side by side.
+
+	case m.rightContentW > 0:
+		// Left content fits beside the table (leftH <= rightH).
+		// Check whether hints would extend below the table's bottom edge; if so,
+		// render them full-width in a bottom block instead of in the narrow left column.
+		hints := m.viewHints(bottomContentW)
+		if leftH+lipgloss.Height(hints) > rightH {
+			topLeftBlock := lipgloss.NewStyle().Width(leftW).Render(paddedLeft)
+			topLeftCol := lipgloss.NewStyle().PaddingLeft(2).PaddingRight(1).Render(topLeftBlock)
+			topRightCol := lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1).Render(rightContent)
+			topRow := lipgloss.JoinHorizontal(lipgloss.Top, topLeftCol, topRightCol)
+			bottomBlock := lipgloss.NewStyle().
+				Width(bottomContentW).
+				PaddingLeft(2).PaddingRight(1).
+				Render(hints)
+			box = boxStyle.Render(lipgloss.JoinVertical(lipgloss.Left, topRow, bottomBlock))
+		} else {
+			hints = m.viewHints(leftW)
+			leftMainBlock := lipgloss.NewStyle().Width(leftW).Render(paddedLeft)
+			leftBlock := lipgloss.JoinVertical(lipgloss.Left, leftMainBlock, hints)
+			leftCol := lipgloss.NewStyle().PaddingLeft(2).PaddingRight(1).Render(leftBlock)
+			rightCol := lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1).Render(rightContent)
+			box = boxStyle.Render(lipgloss.JoinHorizontal(lipgloss.Top, leftCol, rightCol))
+		}
+
+	default:
+		// Detecting or no right content yet: single-column layout.
 		hints := m.viewHints(leftW)
 		leftMainBlock := lipgloss.NewStyle().Width(leftW).Render(paddedLeft)
 		leftBlock := lipgloss.JoinVertical(lipgloss.Left, leftMainBlock, hints)
@@ -683,21 +731,30 @@ func (m Model) viewApplyOrReview() string {
 	return b.String()
 }
 
-func (m Model) viewCategoryReview() string {
+// viewCategoryReviewAboveSep returns the content that sits above the
+// full-width separator: title, subtitle, and the tab bar.
+func (m Model) viewCategoryReviewAboveSep() string {
 	var b strings.Builder
-
 	b.WriteString(titleStyle.Render("boltx") + "\n")
 	b.WriteString(subtitleStyle.Render("Review settings") + "\n\n")
+	b.WriteString(m.viewTabBar())
+	return b.String()
+}
 
-	// Tab bar — the tabs' bottom borders form the visual separator, so no
-	// explicit separator line is needed. One blank line follows for spacing.
-	b.WriteString(m.viewTabBar() + "\n\n")
-	colW := m.leftColW
+// viewCategoryReviewBody returns the options list and optional confirm button
+// that sit below the full-width separator. maxWidth is the available text
+// width for word-wrap; callers should pass bottomContentW when the body
+// spans the full inner width, or leftColW for the narrow fallback.
+func (m Model) viewCategoryReviewBody(maxWidth int) string {
+	var b strings.Builder
+	colW := maxWidth
 	if colW == 0 {
-		colW = 40
+		colW = m.leftColW
+		if colW == 0 {
+			colW = 40
+		}
 	}
 
-	// Options for the current tab and sub-page.
 	page := m.categoryPages[m.activeTab]
 	nSub := subPageCount(len(page.Options))
 	startIdx := m.tabSubPage * maxOptionsPerPage
@@ -718,7 +775,6 @@ func (m Model) viewCategoryReview() string {
 		b.WriteString(renderOptionLine(cursor, radio, opt.Label, itemStyle, colW) + "\n")
 	}
 
-	// Confirm → on the last tab's last sub-page.
 	isLastTab := m.activeTab == len(m.categoryPages)-1
 	isLastSub := m.tabSubPage == nSub-1
 	if isLastTab && isLastSub {
@@ -735,11 +791,16 @@ func (m Model) viewCategoryReview() string {
 	return b.String()
 }
 
+// viewCategoryReview is the fallback used before detection completes.
+func (m Model) viewCategoryReview() string {
+	return m.viewCategoryReviewAboveSep() + "\n\n" + m.viewCategoryReviewBody(m.leftColW)
+}
+
 // viewTabBar renders the horizontal tab strip for the category review stage.
-// The active tab and each of its immediate neighbours (up to one on each side)
-// are shown with their full label inside a bordered box. All other tabs are
-// collapsed to a centred "▫" glyph that occupies the same 3-line height so
-// JoinHorizontal aligns it with the label row of the bordered tabs.
+// The active tab is 3 lines tall (border top, label, open-bottom). Ghost tabs
+// are 2 lines tall (border top + content, no bottom border). Bottom-aligning
+// them makes the active tab visually rise above the background tabs, giving
+// the strip depth. The open bottoms all connect to the separator below.
 func (m Model) viewTabBar() string {
 	parts := make([]string, len(m.categoryPages))
 	for i, page := range m.categoryPages {
@@ -747,36 +808,26 @@ func (m Model) viewTabBar() string {
 		if dist < 0 {
 			dist = -dist
 		}
-		switch {
-		case dist == 0:
+		if dist == 0 {
 			label := page.Name
 			n := subPageCount(len(page.Options))
 			if n > 1 {
 				label = fmt.Sprintf("%s %d/%d", page.Name, m.tabSubPage+1, n)
 			}
 			parts[i] = activeTabStyle.Render(label)
-		case dist == 1:
-			parts[i] = inactiveTabStyle.Render(page.Name)
-		default:
-			// 3-line block, ▫ vertically centred → aligns with the label row.
-			// PaddingLeft(1) keeps a small gap from the adjacent bordered tab.
-			parts[i] = lipgloss.NewStyle().
-				Height(3).
-				PaddingLeft(1).
-				Foreground(muted).
-				Align(lipgloss.Left, lipgloss.Center).
-				Render("▫")
+		} else {
+			parts[i] = ghostTabStyle.Render("")
 		}
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, parts...)
+	return lipgloss.JoinHorizontal(lipgloss.Bottom, parts...)
 }
 
 // renderOptionLine renders one option row with word-wrap when the label is
 // too wide for maxWidth. Continuation lines are indented to align with the
 // first character of the label text.
 func renderOptionLine(cursor, radio, label string, style lipgloss.Style, maxWidth int) string {
-	prefix := cursor + radio // e.g. "  ○ " — 4 plain ASCII chars
-	prefixW := len(prefix)
+	prefix := cursor + radio // e.g. "  ○ " — display width 4, but byte length may differ
+	prefixW := lipgloss.Width(prefix) // use cell width, not byte length (○ ● › are multibyte)
 	if prefixW+len(label) <= maxWidth {
 		return prefix + style.Render(label)
 	}
