@@ -44,6 +44,7 @@ type OSInfo struct {
 	ID         string // e.g. "ubuntu", "fedora", "arch"
 	IDLike     string // e.g. "debian" — parent family declared by the distro
 	Pkg        PackageManager
+	Hostname   string // current system hostname
 }
 
 // DetectOS reads /etc/os-release and returns the parsed OS info.
@@ -56,6 +57,9 @@ func DetectOS() OSInfo {
 		IDLike:     fields["ID_LIKE"],
 	}
 	info.Pkg = resolvePackageManager(info.ID, info.IDLike)
+	if h, err := os.Hostname(); err == nil {
+		info.Hostname = h
+	}
 	return info
 }
 

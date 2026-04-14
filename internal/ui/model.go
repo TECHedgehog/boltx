@@ -5,12 +5,14 @@ import (
 	"regexp"
 	"strings"
 
+	"boltx/internal/apply"
 	"boltx/internal/detect"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
 	bubblesTable "github.com/charmbracelet/bubbles/table"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -45,10 +47,23 @@ const (
 	pageReview
 )
 
-// CategoryOption is a single toggleable setting within a category page.
+// OptionKind describes how an option is rendered and interacted with.
+// Each kind maps to a specific bubbles component that owns input while active.
+type OptionKind int
+
+const (
+	KindToggle    OptionKind = iota // checkbox on/off — no extra component
+	KindTextInput                   // single-line text, backed by bubbles/textinput
+)
+
+// CategoryOption is a single setting within a category page.
 type CategoryOption struct {
 	Label   string
-	Checked bool
+	Kind    OptionKind
+	Checked bool               // will this option be applied?
+	Default string             // detected current value (shown as placeholder)
+	Value   string             // user-supplied value; empty → use Default on apply
+	ApplyFn func(string) error // deferred to GO! tab; nil = not yet implemented
 }
 
 // CategoryPage groups related options under a category name.
@@ -67,47 +82,57 @@ func subPageCount(nOptions int) int {
 }
 
 // buildCategoryPages returns all category pages with defaults pre-filled for the given use case.
-func buildCategoryPages(_ detect.UseCase) []CategoryPage {
+func buildCategoryPages(_ detect.UseCase, osInfo detect.OSInfo) []CategoryPage {
+	placeholder := func(label string) CategoryOption {
+		return CategoryOption{Label: label, Kind: KindToggle}
+	}
 	return []CategoryPage{
 		{
 			Name: "SYS",
 			Options: []CategoryOption{
-				{"Placeholder A", false},
-				{"Placeholder B", false},
-				{"Placeholder C", false},
+				{
+					Label:   "Hostname",
+					Kind:    KindTextInput,
+					Default: osInfo.Hostname,
+					ApplyFn: func(v string) error { return apply.Hostname(v) },
+				},
 			},
 		},
 		{
 			Name: "USR",
 			Options: []CategoryOption{
-				{"Placeholder A", false},
-				{"Placeholder B", false},
-				{"Placeholder C", false},
+				placeholder("Placeholder A"),
+				placeholder("Placeholder B"),
+				placeholder("Placeholder C"),
 			},
 		},
 		{
 			Name: "SEC",
 			Options: []CategoryOption{
-				{"Placeholder A", false},
-				{"Placeholder B", false},
-				{"Placeholder C", false},
+				placeholder("Placeholder A"),
+				placeholder("Placeholder B"),
+				placeholder("Placeholder C"),
 			},
 		},
 		{
 			Name: "NET",
 			Options: []CategoryOption{
-				{"Placeholder A", false},
-				{"Placeholder B", false},
-				{"Placeholder C", false},
+				placeholder("Placeholder A"),
+				placeholder("Placeholder B"),
+				placeholder("Placeholder C"),
 			},
 		},
 		{
 			Name: "PKG",
 			Options: []CategoryOption{
-				{"Placeholder A", false},
-				{"Placeholder B", false},
-				{"Placeholder C", false},
+				placeholder("Placeholder A"),
+				placeholder("Placeholder B"),
+				placeholder("Placeholder C"),
 			},
+		},
+		{
+			Name:    "RUN",
+			Options: []CategoryOption{},
 		},
 		{
 			Name:    "GO!",
@@ -147,6 +172,11 @@ type Model struct {
 	activeTab          int // which category tab is visible
 	tabSubPage         int // sub-page within the active tab (for overflow)
 	categoryPageCursor int // cursor position within the current sub-page
+
+	// Option editing — active while a KindTextInput (or future kind) is being edited.
+	// Only one option can be edited at a time.
+	editingOption bool
+	textInput     textinput.Model
 
 	// Theme cycling — index into Themes slice, advanced by 't'.
 	themeIdx int
@@ -244,6 +274,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m = computeLayout(m)
 
 	case tea.KeyMsg:
+		// While a KindTextInput (or future kind) is open, forward all keys to
+		// the active component. Only Enter and Esc are handled specially here.
+		if m.editingOption {
+			switch msg.String() {
+			case "enter":
+				absIdx := m.tabSubPage*maxOptionsPerPage + m.categoryPageCursor
+				opt := &m.categoryPages[m.activeTab].Options[absIdx]
+				opt.Value = m.textInput.Value()
+				opt.Checked = true
+				m.editingOption = false
+			case "esc":
+				m.editingOption = false
+			default:
+				var cmd tea.Cmd
+				m.textInput, cmd = m.textInput.Update(msg)
+				return m, cmd
+			}
+			return m, nil
+		}
+
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
@@ -275,6 +325,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.activeTab--
 				m.tabSubPage = 0
 				m.categoryPageCursor = 0
+				m.categoryPages = syncOnTabEnter(m.activeTab, m.categoryPages)
 			}
 
 		case "right", "l":
@@ -282,6 +333,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.activeTab++
 				m.tabSubPage = 0
 				m.categoryPageCursor = 0
+				m.categoryPages = syncOnTabEnter(m.activeTab, m.categoryPages)
 			}
 
 		case "up", "k":
@@ -355,7 +407,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if !m.detecting {
 					// Build category pages here so changes survive a back/forward trip
 					// between pageQuickSetup and pageReview.
-					m.categoryPages = buildCategoryPages(useCaseOptions[m.useCaseCursor])
+					m.categoryPages = buildCategoryPages(useCaseOptions[m.useCaseCursor], m.osInfo)
 					m.activeTab = 0
 					m.tabSubPage = 0
 					m.categoryPageCursor = 0
@@ -379,10 +431,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				subPageLen := endIdx - startIdx
 				if m.categoryPageCursor < subPageLen {
 					absIdx := startIdx + m.categoryPageCursor
-					m.categoryPages[m.activeTab].Options[absIdx].Checked =
-						!m.categoryPages[m.activeTab].Options[absIdx].Checked
+					opt := &m.categoryPages[m.activeTab].Options[absIdx]
+					switch opt.Kind {
+					case KindTextInput:
+						ti := textinput.New()
+						ti.Placeholder = opt.Default
+						ti.SetValue(opt.Value)
+						ti.Focus()
+						m.textInput = ti
+						m.editingOption = true
+					default: // KindToggle
+						opt.Checked = !opt.Checked
+					}
 				} else {
-					// Confirm → Stage 5 not yet built
+					// Confirm → GO! apply not yet built
 				}
 			}
 		}
@@ -463,7 +525,12 @@ func (m Model) View() string {
 		tabBarLines := strings.Split(tabBar, "\n")
 		tabBarBottomLine := tabBarLines[len(tabBarLines)-1]
 		tabBarBottomW := lipgloss.Width(tabBarBottomLine)
-		tabBarTopPart := strings.Join(tabBarLines[:len(tabBarLines)-1], "\n")
+		// Indent the visible tab lines one extra space to the right.
+		topLines := tabBarLines[:len(tabBarLines)-1]
+		for i, l := range topLines {
+			topLines[i] = " " + l
+		}
+		tabBarTopPart := strings.Join(topLines, "\n")
 
 		// Regular block: PaddingLeft(2) + Width(leftW), no PaddingRight.
 		// A purple │ is appended to every line instead, forming the vertical
@@ -481,13 +548,14 @@ func (m Model) View() string {
 		}
 		regularBlock = strings.Join(regularLines, "\n")
 
-		// Connector line: "──" + tab bar bottom chars + "─" fill + "╮".
-		// Width = 2 + tabBarBottomW + remaining + 1 = leftW+3, matching every
-		// regularBlock line so JoinHorizontal sees a uniform-width left column.
-		// The ╮ closes the vertical separator against the connector.
-		remaining := leftW - tabBarBottomW
+		// Connector line: "───" + tab bar bottom chars + "─" fill + "╯".
+		// The tabs are indented 1 extra space (see above), so we use 3 leading
+		// dashes instead of 2 and subtract 1 from remaining to keep the total
+		// width at leftW+3 (matching every regularBlock line).
+		// The ╯ closes the vertical separator against the connector.
+		remaining := leftW - tabBarBottomW - 1
 		bareBottom := ansiEscape.ReplaceAllString(tabBarBottomLine, "")
-		bare := "──" + bareBottom
+		bare := "───" + bareBottom
 		if remaining > 0 {
 			bare += strings.Repeat("─", remaining)
 		}
@@ -838,15 +906,32 @@ func (m Model) viewCategoryReviewBody(maxWidth int) string {
 	for i, opt := range subOpts {
 		cursor := noCursorStr
 		itemStyle := normalStyle
-		if m.categoryPageCursor == i {
+		isCursor := m.categoryPageCursor == i
+		if isCursor {
 			cursor = cursorStr
 			itemStyle = selectedStyle
 		}
-		radio := radioOff
-		if opt.Checked {
-			radio = radioOn
+
+		switch opt.Kind {
+		case KindTextInput:
+			displayVal := opt.Value
+			if displayVal == "" {
+				displayVal = opt.Default
+			}
+			b.WriteString(renderOptionLine(cursor, kindTextInputMarker, opt.Label+": ", itemStyle, colW))
+			b.WriteString(mutedStyle.Render(displayVal) + "\n")
+			// When this option is being edited, render the inline text input below it.
+			if isCursor && m.editingOption {
+				indent := strings.Repeat(" ", lipgloss.Width(cursor+kindTextInputMarker))
+				b.WriteString(indent + m.textInput.View() + "\n")
+			}
+		default: // KindToggle
+			radio := radioOff
+			if opt.Checked {
+				radio = radioOn
+			}
+			b.WriteString(renderOptionLine(cursor, radio, opt.Label, itemStyle, colW) + "\n")
 		}
-		b.WriteString(renderOptionLine(cursor, radio, opt.Label, itemStyle, colW) + "\n")
 	}
 
 	if len(page.Options) == 0 {
@@ -884,6 +969,37 @@ func (m Model) viewTabBar() string {
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Bottom, parts...)
 }
+
+// syncOnTabEnter is called every time the active tab changes.
+// It dispatches to tab-specific sync functions as they are implemented.
+func syncOnTabEnter(tabIdx int, pages []CategoryPage) []CategoryPage {
+	switch tabIdx {
+	case tabIndexPKG:
+		return syncPkgTab(pages)
+	case tabIndexRUN:
+		return syncRunTab(pages)
+	}
+	return pages
+}
+
+// Tab index constants — must match the order in buildCategoryPages.
+const (
+	tabIndexSYS = 0
+	tabIndexUSR = 1
+	tabIndexSEC = 2
+	tabIndexNET = 3
+	tabIndexPKG = 4
+	tabIndexRUN = 5
+	tabIndexGO  = 6
+)
+
+// syncPkgTab auto-toggles packages required by other tabs' checked options.
+// Stub — logic added when PKG options are implemented.
+func syncPkgTab(pages []CategoryPage) []CategoryPage { return pages }
+
+// syncRunTab rebuilds the RUN tab based on what was selected in other tabs.
+// Stub — logic added when RUN options are implemented.
+func syncRunTab(pages []CategoryPage) []CategoryPage { return pages }
 
 // renderOptionLine renders one option row with word-wrap when the label is
 // too wide for maxWidth. Continuation lines are indented to align with the

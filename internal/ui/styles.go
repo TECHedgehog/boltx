@@ -71,8 +71,9 @@ var (
 	infoTableBorderStyle lipgloss.Style
 	activeTabStyle       lipgloss.Style
 
-	cursorStr   = "› "
-	noCursorStr = "  "
-	radioOn     = "● "
-	radioOff    = "○ "
+	cursorStr          = "› "
+	noCursorStr        = "  "
+	radioOn            = "● "
+	radioOff           = "○ "
+	kindTextInputMarker = "▶ " // 2-cell width, same as radioOn/radioOff
 )
