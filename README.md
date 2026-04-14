@@ -4,7 +4,7 @@ A TUI tool for setting up Linux systems. Built for newcomers and experienced use
 
 ## Status
 
-Early development — not usable yet.
+Early development — core navigation and configuration selection are working, but changes cannot be applied yet.
 
 ## Built with
 
@@ -16,8 +16,8 @@ Early development — not usable yet.
 
 - [x] Main menu
 - [x] Use case detection (VPS vs dev machine)
-- [ ] Setup categories (firewall, SSH, users, packages...)
-- [ ] Per-category configuration steps
+- [x] Setup categories (firewall, SSH, users, packages...)
+- [x] Per-category configuration steps (toggleable options with tab navigation)
 - [ ] Apply changes
 
 ## Usage
