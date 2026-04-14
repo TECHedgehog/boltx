@@ -54,6 +54,7 @@ type CategoryOption struct {
 // CategoryPage groups related options under a category name.
 type CategoryPage struct {
 	Name    string
+	Icon    string
 	Options []CategoryOption
 }
 
@@ -66,42 +67,59 @@ func subPageCount(nOptions int) int {
 }
 
 // buildCategoryPages returns all category pages with defaults pre-filled for the given use case.
-func buildCategoryPages(uc detect.UseCase) []CategoryPage {
-	vps := uc == detect.UseCaseVPS
+func buildCategoryPages(_ detect.UseCase) []CategoryPage {
 	return []CategoryPage{
 		{
-			Name: "Firewall",
+			Name: "Auth & Access",
 			Options: []CategoryOption{
-				{"Enable firewall", vps},
-				{"Allow SSH (port 22)", vps},
-				{"Allow HTTP (port 80)", vps},
-				{"Allow HTTPS (port 443)", vps},
+				{"Placeholder A", false},
+				{"Placeholder B", false},
+				{"Placeholder C", false},
 			},
 		},
 		{
-			Name: "SSH hardening",
+			Name: "Security & Hardening",
 			Options: []CategoryOption{
-				{"Disable root login", vps},
-				{"Disable password authentication", vps},
+				{"Placeholder A", false},
+				{"Placeholder B", false},
+				{"Placeholder C", false},
 			},
 		},
 		{
-			Name: "Users",
+			Name: "System & Packages",
 			Options: []CategoryOption{
-				{"Create a new sudo user", false},
+				{"Placeholder A", false},
+				{"Placeholder B", false},
+				{"Placeholder C", false},
 			},
 		},
 		{
-			Name: "Packages",
+			Name: "User Environment",
 			Options: []CategoryOption{
-				{"git", true},
-				{"curl", true},
-				{"vim", !vps},
-				{"htop", true},
-				{"build-essential / base-devel", !vps},
-				{"ufw", vps},
-				{"fail2ban", vps},
+				{"Placeholder A", false},
+				{"Placeholder B", false},
+				{"Placeholder C", false},
 			},
+		},
+		{
+			Name: "Networking & Services",
+			Options: []CategoryOption{
+				{"Placeholder A", false},
+				{"Placeholder B", false},
+				{"Placeholder C", false},
+			},
+		},
+		{
+			Name: "System Config",
+			Options: []CategoryOption{
+				{"Placeholder A", false},
+				{"Placeholder B", false},
+				{"Placeholder C", false},
+			},
+		},
+		{
+			Name:    "Review & Apply",
+			Options: []CategoryOption{},
 		},
 	}
 }
@@ -318,16 +336,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case pageReview:
 				curPage := m.categoryPages[m.activeTab]
 				nSub := subPageCount(len(curPage.Options))
+				isLastSub := m.tabSubPage == nSub-1
 				startIdx := m.tabSubPage * maxOptionsPerPage
 				endIdx := min(startIdx+maxOptionsPerPage, len(curPage.Options))
 				subPageLen := endIdx - startIdx
-				isLastTab := m.activeTab == len(m.categoryPages)-1
-				isLastSub := m.tabSubPage == nSub-1
-				// Confirm → counts as one extra cursor position on the last tab+subpage.
 				maxCursor := subPageLen - 1
-				if isLastTab && isLastSub {
-					maxCursor++
-				}
 				if m.categoryPageCursor < maxCursor {
 					m.categoryPageCursor++
 				} else if !isLastSub {
@@ -465,7 +478,7 @@ func (m Model) View() string {
 		// separator. Total line width = leftW+3 (same as with PaddingRight(1)).
 		aboveSepTop := strings.Repeat("\n", topPad) +
 			titleStyle.Render("boltx") + "\n" +
-			subtitleStyle.Render("Review settings") + "\n\n" +
+			subtitleStyle.Render("Review settings") + "\n" +
 			tabBarTopPart
 		regularBlock := lipgloss.NewStyle().PaddingLeft(2).Render(
 			lipgloss.NewStyle().Width(leftW).Render(aboveSepTop))
@@ -816,7 +829,7 @@ func (m Model) viewCategoryReviewBody(maxWidth int) string {
 	}
 
 	page := m.categoryPages[m.activeTab]
-	nSub := subPageCount(len(page.Options))
+
 	startIdx := m.tabSubPage * maxOptionsPerPage
 	endIdx := min(startIdx+maxOptionsPerPage, len(page.Options))
 	subOpts := page.Options[startIdx:endIdx]
@@ -835,17 +848,8 @@ func (m Model) viewCategoryReviewBody(maxWidth int) string {
 		b.WriteString(renderOptionLine(cursor, radio, opt.Label, itemStyle, colW) + "\n")
 	}
 
-	isLastTab := m.activeTab == len(m.categoryPages)-1
-	isLastSub := m.tabSubPage == nSub-1
-	if isLastTab && isLastSub {
-		confirmIdx := len(subOpts)
-		cursor := noCursorStr
-		cStyle := normalStyle
-		if m.categoryPageCursor == confirmIdx {
-			cursor = cursorStr
-			cStyle = selectedStyle
-		}
-		b.WriteString("\n" + cursor + cStyle.Render("Confirm →"))
+	if len(page.Options) == 0 {
+		b.WriteString(mutedStyle.Render("Nothing to configure here yet."))
 	}
 
 	return b.String()
@@ -856,35 +860,67 @@ func (m Model) viewCategoryReview() string {
 	return m.viewCategoryReviewAboveSep() + "\n\n" + m.viewCategoryReviewBody(m.leftColW)
 }
 
+// tabInnerW is the fixed content width (cells) used for the active tab label.
+// Wide enough for every category name to word-wrap into exactly two lines.
+// Active tab total width = tabInnerW + padding(0,1)*2 + border(2) = tabInnerW+4.
+// splitTab2Lines finds the word-boundary split that minimises the max line
+// length when a name is broken into exactly two lines. It tries every possible
+// split point and returns the wrapped string and the resulting column width.
+// A minimum width of 9 is enforced so the narrowest tab still totals ≥28 cells
+// (9 inner + 2 padding + 2 border + 5 ghost×3 = 28).
+func splitTab2Lines(name string) (wrapped string, w int) {
+	words := strings.Fields(name)
+	if len(words) == 1 {
+		return name, len(name)
+	}
+	best := len(name) // worst case: no split
+	bestWrapped := name
+	for i := 1; i < len(words); i++ {
+		l1 := strings.Join(words[:i], " ")
+		l2 := strings.Join(words[i:], " ")
+		if width := max(len(l1), len(l2)); width < best {
+			best = width
+			bestWrapped = l1 + "\n" + l2
+		}
+	}
+	const minTabInnerW = 9
+	if best < minTabInnerW {
+		best = minTabInnerW
+	}
+	return bestWrapped, best
+}
+
 // viewTabBar renders the horizontal tab strip for the category review stage.
-// The active tab is 3 lines tall (border top, label, open-bottom). Ghost tabs
-// are 2 lines tall (border top + content, no bottom border). Bottom-aligning
-// them makes the active tab visually rise above the background tabs, giving
-// the strip depth. The open bottoms all connect to the separator below.
+// Each active tab is sized to its content (tightest 2-line word split).
+// Ghost tabs are a fixed narrow 3-cell border that matches the active tab height,
+// keeping all bottom connectors aligned. The open bottoms connect to the separator.
 func (m Model) viewTabBar() string {
+	activePage := m.categoryPages[m.activeTab]
+	wrappedName, innerW := splitTab2Lines(activePage.Name)
+	n := subPageCount(len(activePage.Options))
+	if n > 1 {
+		wrappedName += fmt.Sprintf(" %d/%d", m.tabSubPage+1, n)
+	}
+	label := lipgloss.NewStyle().Width(innerW).AlignHorizontal(lipgloss.Center).Render(wrappedName)
+	activeRendered := activeTabStyle.Render(label)
+	activeH := lipgloss.Height(activeRendered)
+
 	parts := make([]string, len(m.categoryPages))
-	for i, page := range m.categoryPages {
-		dist := m.activeTab - i
-		if dist < 0 {
-			dist = -dist
+	for i := range m.categoryPages {
+		if i == m.activeTab {
+			parts[i] = activeRendered
+			continue
 		}
-		if dist == 0 {
-			label := page.Name
-			n := subPageCount(len(page.Options))
-			if n > 1 {
-				label = fmt.Sprintf("%s %d/%d", page.Name, m.tabSubPage+1, n)
-			}
-			parts[i] = activeTabStyle.Render(label)
-		} else {
-			// Ghost tabs are 1 line shorter than the active tab (2 vs 3 lines):
-			// top border on line 1, closed connecting bottom on line 2, no
-			// content row. Built manually so we can skip the middle content line
-			// that lipgloss.Border always adds.
-			inner := strings.Repeat("─", 2)
-			top := mutedStyle.Render("╭" + inner + "╮")
-			bot := mutedStyle.Render("┴" + inner + "┴")
-			parts[i] = top + "\n" + bot
+		top := mutedStyle.Render("╭─╮")
+		mid := mutedStyle.Render("│ │")
+		bot := mutedStyle.Render("┴─┴")
+		var sb strings.Builder
+		sb.WriteString(top)
+		for j := 0; j < activeH-3; j++ {
+			sb.WriteString("\n" + mid)
 		}
+		sb.WriteString("\n" + bot)
+		parts[i] = sb.String()
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Bottom, parts...)
 }

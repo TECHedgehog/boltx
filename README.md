@@ -6,6 +6,20 @@ A TUI tool for setting up Linux systems. Built for newcomers and experienced use
 
 Early development — core navigation and configuration selection are working, but changes cannot be applied yet.
 
+## Categories
+
+The review screen is organised into tabs:
+
+| Tab | Description |
+|-----|-------------|
+| Authentication & Access | SSH keys, PAM, sudo rules |
+| Security & Hardening | Root login, password auth, kernel hardening |
+| System & Packages | Essential packages and package manager config |
+| User Environment | User creation, shell, dotfiles |
+| Networking & Services | Firewall, ports, DNS |
+| System Configuration | Hostname, locale, NTP |
+| Review & Apply | Summary and final apply step |
+
 ## Built with
 
 - [Bubbletea](https://github.com/charmbracelet/bubbletea) — TUI framework
@@ -27,8 +41,9 @@ Early development — core navigation and configuration selection are working, b
 
 - [x] Main menu
 - [x] Use case detection (VPS vs dev machine)
-- [x] Setup categories (firewall, SSH, users, packages...)
+- [x] Setup categories (authentication, security, packages, networking…)
 - [x] Per-category configuration steps (toggleable options with tab navigation)
+- [x] Review & Apply tab (final step, apply not yet wired)
 - [x] Theme switching (`t` key, extensible)
 - [ ] Apply changes
 
