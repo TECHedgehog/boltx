@@ -35,13 +35,13 @@ var (
 // When a category has more options than this, it gains extra sub-pages.
 const maxOptionsPerPage = 8
 
-type stage int
+type page int
 
 const (
-	stageMenu stage = iota
-	stageUseCase
-	stageApplyOrReview
-	stageCategoryReview
+	pageWelcome page = iota
+	pageEnvironment
+	pageQuickSetup
+	pageReview
 )
 
 // CategoryOption is a single toggleable setting within a category page.
@@ -116,7 +116,7 @@ type Model struct {
 	width  int
 	height int
 
-	stage      stage
+	page       page
 	menuCursor int
 
 	detecting     bool
@@ -128,10 +128,10 @@ type Model struct {
 	help          help.Model
 	helpExpanded  bool
 
-	// stageApplyOrReview
+	// pageQuickSetup
 	applyOrReviewCursor int
 
-	// stageCategoryReview
+	// pageReview
 	categoryPages      []CategoryPage
 	activeTab          int // which category tab is visible
 	tabSubPage         int // sub-page within the active tab (for overflow)
@@ -238,49 +238,49 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.helpExpanded = !m.helpExpanded
 
 		case "q", "esc":
-			switch m.stage {
-			case stageMenu:
+			switch m.page {
+			case pageWelcome:
 				return m, tea.Quit
-			case stageUseCase:
-				m.stage = stageMenu
-			case stageApplyOrReview:
-				m.stage = stageUseCase
-			case stageCategoryReview:
-				m.stage = stageApplyOrReview
+			case pageEnvironment:
+				m.page = pageWelcome
+			case pageQuickSetup:
+				m.page = pageEnvironment
+			case pageReview:
+				m.page = pageQuickSetup
 				m.activeTab = 0
 				m.tabSubPage = 0
 				m.categoryPageCursor = 0
 			}
 
 		case "left", "h":
-			if m.stage == stageCategoryReview && m.activeTab > 0 {
+			if m.page == pageReview && m.activeTab > 0 {
 				m.activeTab--
 				m.tabSubPage = 0
 				m.categoryPageCursor = 0
 			}
 
 		case "right", "l":
-			if m.stage == stageCategoryReview && m.activeTab < len(m.categoryPages)-1 {
+			if m.page == pageReview && m.activeTab < len(m.categoryPages)-1 {
 				m.activeTab++
 				m.tabSubPage = 0
 				m.categoryPageCursor = 0
 			}
 
 		case "up", "k":
-			switch m.stage {
-			case stageMenu:
+			switch m.page {
+			case pageWelcome:
 				if m.menuCursor > 0 {
 					m.menuCursor--
 				}
-			case stageUseCase:
+			case pageEnvironment:
 				if !m.detecting && m.useCaseCursor > 0 {
 					m.useCaseCursor--
 				}
-			case stageApplyOrReview:
+			case pageQuickSetup:
 				if m.applyOrReviewCursor > 0 {
 					m.applyOrReviewCursor--
 				}
-			case stageCategoryReview:
+			case pageReview:
 				if m.categoryPageCursor > 0 {
 					m.categoryPageCursor--
 				} else if m.tabSubPage > 0 {
@@ -294,20 +294,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "down", "j":
-			switch m.stage {
-			case stageMenu:
+			switch m.page {
+			case pageWelcome:
 				if m.menuCursor < len(menuItems)-1 {
 					m.menuCursor++
 				}
-			case stageUseCase:
+			case pageEnvironment:
 				if !m.detecting && m.useCaseCursor < len(useCaseOptions)-1 {
 					m.useCaseCursor++
 				}
-			case stageApplyOrReview:
+			case pageQuickSetup:
 				if m.applyOrReviewCursor < len(applyOrReviewOptions)-1 {
 					m.applyOrReviewCursor++
 				}
-			case stageCategoryReview:
+			case pageReview:
 				curPage := m.categoryPages[m.activeTab]
 				nSub := subPageCount(len(curPage.Options))
 				startIdx := m.tabSubPage * maxOptionsPerPage
@@ -330,26 +330,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "enter", " ":
-			switch m.stage {
-			case stageMenu:
+			switch m.page {
+			case pageWelcome:
 				switch m.menuCursor {
 				case 0:
-					m.stage = stageUseCase
+					m.page = pageEnvironment
 				case 1:
 					return m, tea.Quit
 				}
-			case stageUseCase:
+			case pageEnvironment:
 				if !m.detecting {
 					// Build category pages here so changes survive a back/forward trip
-					// between stageApplyOrReview and stageCategoryReview.
+					// between pageQuickSetup and pageReview.
 					m.categoryPages = buildCategoryPages(useCaseOptions[m.useCaseCursor])
 					m.activeTab = 0
 					m.tabSubPage = 0
 					m.categoryPageCursor = 0
 					m.applyOrReviewCursor = 0
-					m.stage = stageApplyOrReview
+					m.page = pageQuickSetup
 				}
-			case stageApplyOrReview:
+			case pageQuickSetup:
 				switch m.applyOrReviewCursor {
 				case 0:
 					// Apply recommended — Stage 5: run processes (not yet built)
@@ -357,9 +357,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.activeTab = 0
 					m.tabSubPage = 0
 					m.categoryPageCursor = 0
-					m.stage = stageCategoryReview
+					m.page = pageReview
 				}
-			case stageCategoryReview:
+			case pageReview:
 				curPage := m.categoryPages[m.activeTab]
 				startIdx := m.tabSubPage * maxOptionsPerPage
 				endIdx := min(startIdx+maxOptionsPerPage, len(curPage.Options))
@@ -442,7 +442,7 @@ func (m Model) View() string {
 
 	var box string
 	switch {
-	case m.stage == stageCategoryReview && m.rightContentW > 0:
+	case m.page == pageReview && m.rightContentW > 0:
 		// Category-review layout: title + tab bar sit beside the info table.
 		// A purple │ runs down the right edge of the left column from the top
 		// box border to the connector line, terminated by ╮ on both ends.
@@ -573,12 +573,12 @@ func (m Model) View() string {
 
 // viewLeft returns the main interactive content for the left column (no hints).
 func (m Model) viewLeft() string {
-	switch m.stage {
-	case stageUseCase:
+	switch m.page {
+	case pageEnvironment:
 		return m.viewUseCase()
-	case stageApplyOrReview:
+	case pageQuickSetup:
 		return m.viewApplyOrReview()
-	case stageCategoryReview:
+	case pageReview:
 		return m.viewCategoryReview()
 	default:
 		return m.viewMenu()
@@ -591,7 +591,7 @@ func (m Model) viewHints(maxWidth int) string {
 	h.Width = maxWidth
 
 	if m.helpExpanded {
-		if m.stage == stageCategoryReview {
+		if m.page == pageReview {
 			// Three columns: navigation | actions | meta — max 2 rows total.
 			groups := [][]key.Binding{
 				{keyNav, keyTabNav},
@@ -603,20 +603,20 @@ func (m Model) viewHints(maxWidth int) string {
 		// All other stages: single line using the full box width so it doesn't truncate.
 		h.Width = m.leftColW + m.rightContentW + 2
 		var bindings []key.Binding
-		switch m.stage {
-		case stageUseCase, stageApplyOrReview:
+		switch m.page {
+		case pageEnvironment, pageQuickSetup:
 			bindings = []key.Binding{keyNav, keyConfirm, keyBack, keyHelpLess}
-		default: // stageMenu
+		default: // pageWelcome
 			bindings = []key.Binding{keyNav, keyConfirm, keyQuit, keyHelpLess}
 		}
 		return "\n\n" + h.ShortHelpView(bindings)
 	}
 
 	var bindings []key.Binding
-	switch m.stage {
-	case stageUseCase, stageApplyOrReview:
+	switch m.page {
+	case pageEnvironment, pageQuickSetup:
 		bindings = []key.Binding{keyBack, keyHelpMore}
-	case stageCategoryReview:
+	case pageReview:
 		bindings = []key.Binding{keyBack, keyHelpMore}
 	default:
 		bindings = []key.Binding{keyQuit, keyHelpMore}
@@ -724,7 +724,7 @@ func (m Model) viewUseCase() string {
 	var b strings.Builder
 
 	b.WriteString(titleStyle.Render("boltx") + "\n")
-	b.WriteString(subtitleStyle.Render("Use case selection") + "\n\n")
+	b.WriteString(subtitleStyle.Render("Environment") + "\n\n")
 
 	if m.detecting {
 		b.WriteString(mutedStyle.Render("Detecting environment..."))
@@ -761,7 +761,7 @@ func (m Model) viewApplyOrReview() string {
 	var b strings.Builder
 
 	b.WriteString(titleStyle.Render("boltx") + "\n")
-	b.WriteString(subtitleStyle.Render("How would you like to proceed?") + "\n\n")
+	b.WriteString(subtitleStyle.Render("Quick setup") + "\n\n")
 
 	uc := useCaseOptions[m.useCaseCursor]
 	b.WriteString(mutedStyle.Render("Use case: ") + normalStyle.Render(uc.String()) + "\n\n")
