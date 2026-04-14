@@ -12,12 +12,24 @@ Early development — core navigation and configuration selection are working, b
 - [Lipgloss](https://github.com/charmbracelet/lipgloss) — terminal styling
 - [Bubbles](https://github.com/charmbracelet/bubbles) — UI components
 
+## Keybindings
+
+| Key | Action |
+|-----|--------|
+| `↑↓` / `jk` | Navigate |
+| `←→` / `hl` | Switch tabs (review screen) |
+| `enter` / `space` | Select / toggle |
+| `t` | Cycle theme (Purple → Teal → Amber) |
+| `?` | Toggle help |
+| `q` / `esc` | Back / quit |
+
 ## Roadmap
 
 - [x] Main menu
 - [x] Use case detection (VPS vs dev machine)
 - [x] Setup categories (firewall, SSH, users, packages...)
 - [x] Per-category configuration steps (toggleable options with tab navigation)
+- [x] Theme switching (`t` key, extensible)
 - [ ] Apply changes
 
 ## Usage

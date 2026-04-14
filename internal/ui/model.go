@@ -29,6 +29,7 @@ var (
 	keyQuit     = key.NewBinding(key.WithKeys("q", "esc"), key.WithHelp("q/esc", "quit"))
 	keyHelpMore = key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "more"))
 	keyHelpLess = key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "less"))
+	keyTheme    = key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "theme"))
 )
 
 // maxOptionsPerPage is the maximum number of options shown per tab sub-page.
@@ -137,6 +138,9 @@ type Model struct {
 	tabSubPage         int // sub-page within the active tab (for overflow)
 	categoryPageCursor int // cursor position within the current sub-page
 
+	// Theme cycling — index into Themes slice, advanced by 't'.
+	themeIdx int
+
 	// Layout — recomputed on every terminal resize and after detection completes.
 	rightContentW int // measured width of the rendered info table (set after detection)
 	rightContentH int // measured height of the rendered info table (set after detection)
@@ -167,16 +171,16 @@ var applyOrReviewOptions = []string{
 func NewModel() Model {
 	s := spinner.New()
 	s.Spinner = spinner.Dot
-	s.Style = lipgloss.NewStyle().Foreground(purple)
+	s.Style = lipgloss.NewStyle().Foreground(Themes[0].Accent)
 
 	h := help.New()
-	h.Styles.ShortKey = lipgloss.NewStyle().Foreground(white)
-	h.Styles.ShortDesc = lipgloss.NewStyle().Foreground(muted)
-	h.Styles.ShortSeparator = lipgloss.NewStyle().Foreground(muted)
-	h.Styles.Ellipsis = lipgloss.NewStyle().Foreground(muted)
-	h.Styles.FullKey = lipgloss.NewStyle().Foreground(white)
-	h.Styles.FullDesc = lipgloss.NewStyle().Foreground(muted)
-	h.Styles.FullSeparator = lipgloss.NewStyle().Foreground(muted)
+	h.Styles.ShortKey = lipgloss.NewStyle().Foreground(Themes[0].Text)
+	h.Styles.ShortDesc = lipgloss.NewStyle().Foreground(Themes[0].Muted)
+	h.Styles.ShortSeparator = lipgloss.NewStyle().Foreground(Themes[0].Muted)
+	h.Styles.Ellipsis = lipgloss.NewStyle().Foreground(Themes[0].Muted)
+	h.Styles.FullKey = lipgloss.NewStyle().Foreground(Themes[0].Text)
+	h.Styles.FullDesc = lipgloss.NewStyle().Foreground(Themes[0].Muted)
+	h.Styles.FullSeparator = lipgloss.NewStyle().Foreground(Themes[0].Muted)
 
 	return Model{
 		detecting: true,
@@ -236,6 +240,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "?":
 			m.helpExpanded = !m.helpExpanded
+
+		case "t":
+			m.themeIdx = (m.themeIdx + 1) % len(Themes)
+			applyTheme(Themes[m.themeIdx])
 
 		case "q", "esc":
 			switch m.page {
@@ -461,7 +469,7 @@ func (m Model) View() string {
 			tabBarTopPart
 		regularBlock := lipgloss.NewStyle().PaddingLeft(2).Render(
 			lipgloss.NewStyle().Width(leftW).Render(aboveSepTop))
-		purpleBar := lipgloss.NewStyle().Foreground(purple).Render("│")
+		purpleBar := lipgloss.NewStyle().Foreground(Themes[m.themeIdx].Accent).Render("│")
 		regularLines := strings.Split(regularBlock, "\n")
 		for i, l := range regularLines {
 			regularLines[i] = l + purpleBar
@@ -479,7 +487,7 @@ func (m Model) View() string {
 			bare += strings.Repeat("─", remaining)
 		}
 		bare += "╯"
-		connectorLine := lipgloss.NewStyle().Foreground(purple).Render(bare)
+		connectorLine := lipgloss.NewStyle().Foreground(Themes[m.themeIdx].Accent).Render(bare)
 
 		leftAboveCol := regularBlock + "\n" + connectorLine
 		rightAboveCol := lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1).Render(rightContent)
@@ -504,7 +512,7 @@ func (m Model) View() string {
 			runes := []rune(stripped)
 			if pos := leftW + 3; pos < len(runes) {
 				runes[pos] = '┬'
-				boxLines[0] = lipgloss.NewStyle().Foreground(purple).Render(string(runes))
+				boxLines[0] = lipgloss.NewStyle().Foreground(Themes[m.themeIdx].Accent).Render(string(runes))
 			}
 			box = strings.Join(boxLines, "\n")
 		}
@@ -621,7 +629,8 @@ func (m Model) viewHints(maxWidth int) string {
 	default:
 		bindings = []key.Binding{keyQuit, keyHelpMore}
 	}
-	return "\n\n" + h.ShortHelpView(bindings)
+	themeName := mutedStyle.Render("  [" + Themes[m.themeIdx].Name + "]")
+	return "\n\n" + h.ShortHelpView(bindings) + themeName
 }
 
 // viewRight returns the system info table for the right column.
@@ -685,9 +694,9 @@ func buildInfoTable(env detect.Environment, osInfo detect.OSInfo) bubblesTable.M
 	}
 
 	s := bubblesTable.Styles{
-		Header:   lipgloss.NewStyle().Bold(true).Foreground(muted).Padding(0, 1),
-		Cell:     lipgloss.NewStyle().Foreground(white).Padding(0, 1),
-		Selected: lipgloss.NewStyle().Foreground(white),
+		Header:   mutedStyle.Padding(0, 1),
+		Cell:     normalStyle.Padding(0, 1),
+		Selected: normalStyle,
 	}
 
 	return bubblesTable.New(

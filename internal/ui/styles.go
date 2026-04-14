@@ -13,44 +13,66 @@ func tabBorderWithBottom(left, middle, right string) lipgloss.Border {
 	return b
 }
 
+// Theme holds the four colors that define a visual theme.
+// To add a new theme, append a Theme{} literal to the Themes slice below.
+type Theme struct {
+	Name    string
+	Accent  lipgloss.Color // primary accent: titles, selected items, borders
+	Muted   lipgloss.Color // secondary text: hints, descriptions, inactive
+	Text    lipgloss.Color // default text content
+	Success lipgloss.Color // suggestions / positive indicators
+}
 
-var (
-	purple = lipgloss.Color("#7C3AED")
-	muted  = lipgloss.Color("#6B7280")
-	white  = lipgloss.Color("#F9FAFB")
-	green  = lipgloss.Color("#10B981")
+// Themes is the ordered list of available themes. Press 't' to cycle through them.
+var Themes = []Theme{
+	{Name: "Purple", Accent: "#7C3AED", Muted: "#6B7280", Text: "#F9FAFB", Success: "#10B981"},
+	{Name: "Teal",   Accent: "#0D9488", Muted: "#6B7280", Text: "#F9FAFB", Success: "#FBBF24"},
+	{Name: "Amber",  Accent: "#D97706", Muted: "#6B7280", Text: "#F9FAFB", Success: "#10B981"},
+}
 
-	titleStyle    = lipgloss.NewStyle().Bold(true).Foreground(purple)
-	subtitleStyle = lipgloss.NewStyle().Foreground(muted)
-	selectedStyle = lipgloss.NewStyle().Bold(true).Foreground(purple)
-	normalStyle   = lipgloss.NewStyle().Foreground(white)
-	mutedStyle    = lipgloss.NewStyle().Foreground(muted)
-	greenStyle    = lipgloss.NewStyle().Foreground(green)
-
+// applyTheme reassigns all style vars to match theme t.
+// Called once at init and again each time the user presses 't'.
+func applyTheme(t Theme) {
+	titleStyle    = lipgloss.NewStyle().Bold(true).Foreground(t.Accent)
+	subtitleStyle = lipgloss.NewStyle().Foreground(t.Muted)
+	selectedStyle = lipgloss.NewStyle().Bold(true).Foreground(t.Accent)
+	normalStyle   = lipgloss.NewStyle().Foreground(t.Text)
+	mutedStyle    = lipgloss.NewStyle().Foreground(t.Muted)
+	greenStyle    = lipgloss.NewStyle().Foreground(t.Success)
+	sectionStyle  = lipgloss.NewStyle().Bold(true).Foreground(t.Text)
 	boxStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(purple)
-
-	// infoTableBorderStyle wraps the right-column info table.
-	// Defined here so viewRight does not allocate a new style every frame.
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.Accent)
 	infoTableBorderStyle = lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(muted)
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.Muted)
+	activeTabStyle = lipgloss.NewStyle().
+		Bold(true).
+		Foreground(t.Accent).
+		Border(tabBorderWithBottom("┘", " ", "└"), true).
+		BorderForeground(t.Accent).
+		Padding(0, 1)
+}
 
-	sectionStyle = lipgloss.NewStyle().Bold(true).Foreground(white)
+func init() {
+	applyTheme(Themes[0])
+}
+
+// Style vars — reassigned by applyTheme, read by view functions.
+var (
+	titleStyle           lipgloss.Style
+	subtitleStyle        lipgloss.Style
+	selectedStyle        lipgloss.Style
+	normalStyle          lipgloss.Style
+	mutedStyle           lipgloss.Style
+	greenStyle           lipgloss.Style
+	sectionStyle         lipgloss.Style
+	boxStyle             lipgloss.Style
+	infoTableBorderStyle lipgloss.Style
+	activeTabStyle       lipgloss.Style
 
 	cursorStr   = "› "
 	noCursorStr = "  "
 	radioOn     = "● "
 	radioOff    = "○ "
-
-	// activeTabStyle: open bottom (┘ space └) so the tab visually connects to
-	// the content below — like a browser or Office tab.
-	activeTabStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(purple).
-			Border(tabBorderWithBottom("┘", " ", "└"), true).
-			BorderForeground(purple).
-			Padding(0, 1)
-
 )
