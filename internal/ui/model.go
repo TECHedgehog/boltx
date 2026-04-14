@@ -686,7 +686,7 @@ func (m Model) viewHints(maxWidth int) string {
 			groups := [][]key.Binding{
 				{keyNav, keyTabNav},
 				{keySelect, keyBack},
-				{keyHelpLess},
+				{keyTheme, keyHelpLess},
 			}
 			return "\n\n" + h.FullHelpView(groups)
 		}
@@ -695,9 +695,9 @@ func (m Model) viewHints(maxWidth int) string {
 		var bindings []key.Binding
 		switch m.page {
 		case pageEnvironment, pageQuickSetup:
-			bindings = []key.Binding{keyNav, keyConfirm, keyBack, keyHelpLess}
+			bindings = []key.Binding{keyNav, keyConfirm, keyBack, keyTheme, keyHelpLess}
 		default: // pageWelcome
-			bindings = []key.Binding{keyNav, keyConfirm, keyQuit, keyHelpLess}
+			bindings = []key.Binding{keyNav, keyConfirm, keyQuit, keyTheme, keyHelpLess}
 		}
 		return "\n\n" + h.ShortHelpView(bindings)
 	}
