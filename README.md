@@ -12,13 +12,12 @@ The review screen is organised into tabs:
 
 | Tab | Description |
 |-----|-------------|
-| Authentication & Access | Users (sudo, groups, etc), SSH setup |
-| Security & Hardening | Firewall setup (ufw), fail2ban, policies |
-| System & Packages | Update/Upgrade, Essential pkgs, cleanup/maintenance |
-| User Environment | shell, omz, dotfiles, aliases, env |
-| Networking & Services | Web servers (i.e. cockpit), Proxy managers (traefik, nginx) |
-| System Configuration | Hostname, locale, Timezone |
-| Review & Apply | Summary and final apply step |
+| SYS | Hostname, locale, timezone |
+| USR | Users (sudo, groups), SSH setup, shell, dotfiles |
+| SEC | Firewall (ufw), fail2ban, policies |
+| NET | Web servers (cockpit), proxy managers (traefik, nginx) |
+| PKG | Update/upgrade, essential packages, cleanup |
+| GO! | Summary and final apply step |
 
 ## Built with
 

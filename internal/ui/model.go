@@ -70,7 +70,7 @@ func subPageCount(nOptions int) int {
 func buildCategoryPages(_ detect.UseCase) []CategoryPage {
 	return []CategoryPage{
 		{
-			Name: "Auth & Access",
+			Name: "SYS",
 			Options: []CategoryOption{
 				{"Placeholder A", false},
 				{"Placeholder B", false},
@@ -78,7 +78,7 @@ func buildCategoryPages(_ detect.UseCase) []CategoryPage {
 			},
 		},
 		{
-			Name: "Security & Hardening",
+			Name: "USR",
 			Options: []CategoryOption{
 				{"Placeholder A", false},
 				{"Placeholder B", false},
@@ -86,7 +86,7 @@ func buildCategoryPages(_ detect.UseCase) []CategoryPage {
 			},
 		},
 		{
-			Name: "System & Packages",
+			Name: "SEC",
 			Options: []CategoryOption{
 				{"Placeholder A", false},
 				{"Placeholder B", false},
@@ -94,7 +94,7 @@ func buildCategoryPages(_ detect.UseCase) []CategoryPage {
 			},
 		},
 		{
-			Name: "User Environment",
+			Name: "NET",
 			Options: []CategoryOption{
 				{"Placeholder A", false},
 				{"Placeholder B", false},
@@ -102,7 +102,7 @@ func buildCategoryPages(_ detect.UseCase) []CategoryPage {
 			},
 		},
 		{
-			Name: "Networking & Services",
+			Name: "PKG",
 			Options: []CategoryOption{
 				{"Placeholder A", false},
 				{"Placeholder B", false},
@@ -110,15 +110,7 @@ func buildCategoryPages(_ detect.UseCase) []CategoryPage {
 			},
 		},
 		{
-			Name: "System Config",
-			Options: []CategoryOption{
-				{"Placeholder A", false},
-				{"Placeholder B", false},
-				{"Placeholder C", false},
-			},
-		},
-		{
-			Name:    "Review & Apply",
+			Name:    "GO!",
 			Options: []CategoryOption{},
 		},
 	}
@@ -478,7 +470,7 @@ func (m Model) View() string {
 		// separator. Total line width = leftW+3 (same as with PaddingRight(1)).
 		aboveSepTop := strings.Repeat("\n", topPad) +
 			titleStyle.Render("boltx") + "\n" +
-			subtitleStyle.Render("Review settings") + "\n" +
+			subtitleStyle.Render("Review settings") + "\n\n" +
 			tabBarTopPart
 		regularBlock := lipgloss.NewStyle().PaddingLeft(2).Render(
 			lipgloss.NewStyle().Width(leftW).Render(aboveSepTop))
@@ -526,6 +518,15 @@ func (m Model) View() string {
 			if pos := leftW + 3; pos < len(runes) {
 				runes[pos] = '┬'
 				boxLines[0] = lipgloss.NewStyle().Foreground(Themes[m.themeIdx].Accent).Render(string(runes))
+			}
+			// Replace │ with ├ on the left border at the connector-line row.
+			// Use raw string replacement to preserve existing ANSI colors in the line.
+			connectorRowIdx := lipgloss.Height(leftAboveCol)
+			if connectorRowIdx < len(boxLines) {
+				raw := boxLines[connectorRowIdx]
+				if idx := strings.Index(raw, "│"); idx >= 0 {
+					boxLines[connectorRowIdx] = raw[:idx] + "├" + raw[idx+len("│"):]
+				}
 			}
 			box = strings.Join(boxLines, "\n")
 		}
@@ -860,67 +861,26 @@ func (m Model) viewCategoryReview() string {
 	return m.viewCategoryReviewAboveSep() + "\n\n" + m.viewCategoryReviewBody(m.leftColW)
 }
 
-// tabInnerW is the fixed content width (cells) used for the active tab label.
-// Wide enough for every category name to word-wrap into exactly two lines.
-// Active tab total width = tabInnerW + padding(0,1)*2 + border(2) = tabInnerW+4.
-// splitTab2Lines finds the word-boundary split that minimises the max line
-// length when a name is broken into exactly two lines. It tries every possible
-// split point and returns the wrapped string and the resulting column width.
-// A minimum width of 9 is enforced so the narrowest tab still totals ≥28 cells
-// (9 inner + 2 padding + 2 border + 5 ghost×3 = 28).
-func splitTab2Lines(name string) (wrapped string, w int) {
-	words := strings.Fields(name)
-	if len(words) == 1 {
-		return name, len(name)
-	}
-	best := len(name) // worst case: no split
-	bestWrapped := name
-	for i := 1; i < len(words); i++ {
-		l1 := strings.Join(words[:i], " ")
-		l2 := strings.Join(words[i:], " ")
-		if width := max(len(l1), len(l2)); width < best {
-			best = width
-			bestWrapped = l1 + "\n" + l2
-		}
-	}
-	const minTabInnerW = 9
-	if best < minTabInnerW {
-		best = minTabInnerW
-	}
-	return bestWrapped, best
-}
-
 // viewTabBar renders the horizontal tab strip for the category review stage.
-// Each active tab is sized to its content (tightest 2-line word split).
-// Ghost tabs are a fixed narrow 3-cell border that matches the active tab height,
-// keeping all bottom connectors aligned. The open bottoms connect to the separator.
+// The active tab is 3 lines tall (top border, label, open bottom). Ghost tabs
+// are 2 lines tall (top border, bottom connector). Bottom-aligning them makes
+// the active tab rise above the ghost tabs. All open bottoms connect to the
+// separator below.
 func (m Model) viewTabBar() string {
-	activePage := m.categoryPages[m.activeTab]
-	wrappedName, innerW := splitTab2Lines(activePage.Name)
-	n := subPageCount(len(activePage.Options))
-	if n > 1 {
-		wrappedName += fmt.Sprintf(" %d/%d", m.tabSubPage+1, n)
-	}
-	label := lipgloss.NewStyle().Width(innerW).AlignHorizontal(lipgloss.Center).Render(wrappedName)
-	activeRendered := activeTabStyle.Render(label)
-	activeH := lipgloss.Height(activeRendered)
-
 	parts := make([]string, len(m.categoryPages))
-	for i := range m.categoryPages {
+	for i, page := range m.categoryPages {
 		if i == m.activeTab {
-			parts[i] = activeRendered
-			continue
+			label := page.Name
+			n := subPageCount(len(page.Options))
+			if n > 1 {
+				label = fmt.Sprintf("%s %d/%d", page.Name, m.tabSubPage+1, n)
+			}
+			parts[i] = activeTabStyle.Render(label)
+		} else {
+			top := mutedStyle.Render("╭──╮")
+			bot := mutedStyle.Render("┴──┴")
+			parts[i] = top + "\n" + bot
 		}
-		top := mutedStyle.Render("╭─╮")
-		mid := mutedStyle.Render("│ │")
-		bot := mutedStyle.Render("┴─┴")
-		var sb strings.Builder
-		sb.WriteString(top)
-		for j := 0; j < activeH-3; j++ {
-			sb.WriteString("\n" + mid)
-		}
-		sb.WriteString("\n" + bot)
-		parts[i] = sb.String()
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Bottom, parts...)
 }
