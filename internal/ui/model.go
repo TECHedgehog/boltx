@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"boltx/internal/detect"
@@ -13,6 +14,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
+
+// ansiEscape matches ANSI SGR escape sequences so they can be stripped from
+// rendered strings before re-applying a different color.
+var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
 // Key bindings shared across stages.
 var (
@@ -438,16 +443,47 @@ func (m Model) View() string {
 	var box string
 	switch {
 	case m.stage == stageCategoryReview && m.rightContentW > 0:
-		// Category-review layout: title + tab bar sit beside the info table as a
-		// header block. A full-width separator line divides them from the options
-		// below, which span the full inner width.
-		aboveSep := strings.Repeat("\n", topPad) + m.viewCategoryReviewAboveSep()
-		leftAboveBlock := lipgloss.NewStyle().Width(leftW).Render(aboveSep)
-		leftAboveCol := lipgloss.NewStyle().PaddingLeft(2).PaddingRight(1).Render(leftAboveBlock)
-		rightAboveCol := lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1).Render(rightContent)
-		headerRow := lipgloss.JoinHorizontal(lipgloss.Top, leftAboveCol, rightAboveCol)
+		// Category-review layout: title + tab bar sit beside the info table.
+		// A purple │ runs down the right edge of the left column from the top
+		// box border to the connector line, terminated by ╮ on both ends.
+		tabBar := m.viewTabBar()
+		tabBarLines := strings.Split(tabBar, "\n")
+		tabBarBottomLine := tabBarLines[len(tabBarLines)-1]
+		tabBarBottomW := lipgloss.Width(tabBarBottomLine)
+		tabBarTopPart := strings.Join(tabBarLines[:len(tabBarLines)-1], "\n")
 
-		separatorRow := mutedStyle.Render(strings.Repeat("─", lipgloss.Width(headerRow)))
+		// Regular block: PaddingLeft(2) + Width(leftW), no PaddingRight.
+		// A purple │ is appended to every line instead, forming the vertical
+		// separator. Total line width = leftW+3 (same as with PaddingRight(1)).
+		aboveSepTop := strings.Repeat("\n", topPad) +
+			titleStyle.Render("boltx") + "\n" +
+			subtitleStyle.Render("Review settings") + "\n\n" +
+			tabBarTopPart
+		regularBlock := lipgloss.NewStyle().PaddingLeft(2).Render(
+			lipgloss.NewStyle().Width(leftW).Render(aboveSepTop))
+		purpleBar := lipgloss.NewStyle().Foreground(purple).Render("│")
+		regularLines := strings.Split(regularBlock, "\n")
+		for i, l := range regularLines {
+			regularLines[i] = l + purpleBar
+		}
+		regularBlock = strings.Join(regularLines, "\n")
+
+		// Connector line: "──" + tab bar bottom chars + "─" fill + "╮".
+		// Width = 2 + tabBarBottomW + remaining + 1 = leftW+3, matching every
+		// regularBlock line so JoinHorizontal sees a uniform-width left column.
+		// The ╮ closes the vertical separator against the connector.
+		remaining := leftW - tabBarBottomW
+		bareBottom := ansiEscape.ReplaceAllString(tabBarBottomLine, "")
+		bare := "──" + bareBottom
+		if remaining > 0 {
+			bare += strings.Repeat("─", remaining)
+		}
+		bare += "╯"
+		connectorLine := lipgloss.NewStyle().Foreground(purple).Render(bare)
+
+		leftAboveCol := regularBlock + "\n" + connectorLine
+		rightAboveCol := lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1).Render(rightContent)
+		aboveRow := lipgloss.JoinHorizontal(lipgloss.Top, leftAboveCol, rightAboveCol)
 
 		body := m.viewCategoryReviewBody(bottomContentW)
 		hints := m.viewHints(bottomContentW)
@@ -456,7 +492,22 @@ func (m Model) View() string {
 			PaddingLeft(2).PaddingRight(1).
 			Render(body + hints)
 
-		box = boxStyle.Render(lipgloss.JoinVertical(lipgloss.Left, headerRow, separatorRow, bodyBlock))
+		box = boxStyle.Render(lipgloss.JoinVertical(lipgloss.Left, aboveRow, bodyBlock))
+
+		// Insert ╮ into the top border directly above the │ separator column.
+		// The separator is at inner-content column leftW+2; top-border rune
+		// index = (leftW+2) + 1 = leftW+3 (offset by 1 for the leading ╭).
+		// leftW adapts to rightContentW so this stays correct if the table grows.
+		boxLines := strings.Split(box, "\n")
+		if len(boxLines) > 0 {
+			stripped := ansiEscape.ReplaceAllString(boxLines[0], "")
+			runes := []rune(stripped)
+			if pos := leftW + 3; pos < len(runes) {
+				runes[pos] = '┬'
+				boxLines[0] = lipgloss.NewStyle().Foreground(purple).Render(string(runes))
+			}
+			box = strings.Join(boxLines, "\n")
+		}
 
 	case m.rightContentW > 0 && leftH > rightH:
 		// Overflow layout: first rightH lines sit beside the table; the rest
@@ -816,7 +867,14 @@ func (m Model) viewTabBar() string {
 			}
 			parts[i] = activeTabStyle.Render(label)
 		} else {
-			parts[i] = ghostTabStyle.Render("")
+			// Ghost tabs are 1 line shorter than the active tab (2 vs 3 lines):
+			// top border on line 1, closed connecting bottom on line 2, no
+			// content row. Built manually so we can skip the middle content line
+			// that lipgloss.Border always adds.
+			inner := strings.Repeat("─", 2)
+			top := mutedStyle.Render("╭" + inner + "╮")
+			bot := mutedStyle.Render("┴" + inner + "┴")
+			parts[i] = top + "\n" + bot
 		}
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Bottom, parts...)
@@ -826,7 +884,7 @@ func (m Model) viewTabBar() string {
 // too wide for maxWidth. Continuation lines are indented to align with the
 // first character of the label text.
 func renderOptionLine(cursor, radio, label string, style lipgloss.Style, maxWidth int) string {
-	prefix := cursor + radio // e.g. "  ○ " — display width 4, but byte length may differ
+	prefix := cursor + radio          // e.g. "  ○ " — display width 4, but byte length may differ
 	prefixW := lipgloss.Width(prefix) // use cell width, not byte length (○ ● › are multibyte)
 	if prefixW+len(label) <= maxWidth {
 		return prefix + style.Render(label)

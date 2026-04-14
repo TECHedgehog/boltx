@@ -53,10 +53,4 @@ var (
 			BorderForeground(purple).
 			Padding(0, 1)
 
-	// ghostTabStyle: all non-active tabs — small empty box with a closed
-	// bottom (┴─┴) that visually connects down to the full-width separator.
-	ghostTabStyle = lipgloss.NewStyle().
-			Border(tabBorderWithBottom("┴", "─", "┴"), true).
-			BorderForeground(muted).
-			Width(2)
 )
