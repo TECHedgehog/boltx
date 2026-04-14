@@ -3,10 +3,10 @@ Output assets/gifs/boltx.gif
 Set Shell "bash"
 Set FontSize 20
 Set Width 1000
-Set Height 450
-Set TypingSpeed 0.2
+Set Height 470
+Set TypingSpeed 0.1
 Set WindowBar Colorful
-Set Theme "Serendipity Midnight"
+Set Theme "Raycast_Dark"
 Set Framerate 60
 Set Margin 20
 Set MarginFill "#0F1026"
@@ -14,26 +14,24 @@ Set BorderRadius 10
 
 #Env VHS_NO_SANDBOX "true"
 
-Sleep 1s
-
 Type "go run ."   
 Enter
 
-Sleep 5s
+Sleep 2s
 
 Type "?"
 Sleep 2s
 
 Type "t" #change to teal theme
-Sleep 1s
+Sleep 500ms
 Type "t" #change to Amber theme
-Sleep 1s
+Sleep 500ms
 Type "t" #change to Purple theme
-Sleep 1s
+Sleep 500ms
 Type "t" #change to teal theme
-Sleep 1s
+Sleep 500ms
 Type "t" #change to Amber theme
-Sleep 1s
+Sleep 500ms
 Type "t" #change to Purple theme
 Sleep 1s
 
@@ -44,4 +42,4 @@ Down
 Sleep 1s
 Enter
 
-Sleep 1s
+Sleep 2s

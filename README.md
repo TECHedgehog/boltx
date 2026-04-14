@@ -1,5 +1,7 @@
 # boltx
 
+![boltx](assets/gifs/boltx.gif)
+
 A TUI tool for setting up Linux systems. Built for newcomers and experienced users who want a faster path to a working machine.
 
 ## Status
