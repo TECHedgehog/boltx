@@ -690,6 +690,19 @@ func (m Model) viewLeft() string {
 	}
 }
 
+// shortHelpView calls h.ShortHelpView and strips the trailing "…" line that
+// bubbles/help appends when not all bindings fit the width, keeping the hint
+// to a single line so it never unexpectedly grows the layout.
+func shortHelpView(h help.Model, bindings []key.Binding) string {
+	v := h.ShortHelpView(bindings)
+	if idx := strings.LastIndex(v, "\n"); idx >= 0 {
+		if strings.TrimSpace(v[idx+1:]) == "…" {
+			v = v[:idx]
+		}
+	}
+	return v
+}
+
 // viewHints renders the help line constrained to maxWidth.
 func (m Model) viewHints(maxWidth int) string {
 	h := m.help
@@ -714,7 +727,7 @@ func (m Model) viewHints(maxWidth int) string {
 		default: // pageWelcome
 			bindings = []key.Binding{keyNav, keyConfirm, keyQuit, keyTheme, keyHelpLess}
 		}
-		return "\n\n" + h.ShortHelpView(bindings)
+		return "\n\n" + shortHelpView(h, bindings)
 	}
 
 	var bindings []key.Binding
@@ -727,7 +740,7 @@ func (m Model) viewHints(maxWidth int) string {
 		bindings = []key.Binding{keyQuit, keyHelpMore}
 	}
 	themeName := mutedStyle.Render("  [" + Themes[m.themeIdx].Name + "]")
-	return "\n\n" + h.ShortHelpView(bindings) + themeName
+	return "\n\n" + shortHelpView(h, bindings) + themeName
 }
 
 // viewRight returns the system info table for the right column.
