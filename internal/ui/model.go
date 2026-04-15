@@ -637,26 +637,11 @@ func (m Model) View() string {
 			box = boxStyle.Render(lipgloss.JoinVertical(lipgloss.Left, topRow, bottomBlock))
 		} else {
 			hints = m.viewHints(leftW)
-			if lipgloss.Height(hints) > 3 {
-				// hints wrap at leftW (bubbles/help appended "..." which itself wraps);
-				// push to full-width bottom block so nothing is clipped.
-				topLeftBlock := lipgloss.NewStyle().Width(leftW).Render(paddedLeft)
-				topLeftCol := lipgloss.NewStyle().PaddingLeft(2).PaddingRight(1).Render(topLeftBlock)
-				topRightCol := lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1).Render(rightContent)
-				topRow := lipgloss.JoinHorizontal(lipgloss.Top, topLeftCol, topRightCol)
-				hints = m.viewHints(bottomContentW)
-				bottomBlock := lipgloss.NewStyle().
-					Width(bottomContentW).
-					PaddingLeft(2).PaddingRight(1).
-					Render(hints)
-				box = boxStyle.Render(lipgloss.JoinVertical(lipgloss.Left, topRow, bottomBlock))
-			} else {
-				leftMainBlock := lipgloss.NewStyle().Width(leftW).Render(paddedLeft)
-				leftBlock := lipgloss.JoinVertical(lipgloss.Left, leftMainBlock, hints)
-				leftCol := lipgloss.NewStyle().PaddingLeft(2).PaddingRight(1).Render(leftBlock)
-				rightCol := lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1).Render(rightContent)
-				box = boxStyle.Render(lipgloss.JoinHorizontal(lipgloss.Top, leftCol, rightCol))
-			}
+			leftMainBlock := lipgloss.NewStyle().Width(leftW).Render(paddedLeft)
+			leftBlock := lipgloss.JoinVertical(lipgloss.Left, leftMainBlock, hints)
+			leftCol := lipgloss.NewStyle().PaddingLeft(2).PaddingRight(1).Render(leftBlock)
+			rightCol := lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1).Render(rightContent)
+			box = boxStyle.Render(lipgloss.JoinHorizontal(lipgloss.Top, leftCol, rightCol))
 		}
 
 	default:
@@ -690,19 +675,6 @@ func (m Model) viewLeft() string {
 	}
 }
 
-// shortHelpView calls h.ShortHelpView and strips the trailing "…" line that
-// bubbles/help appends when not all bindings fit the width, keeping the hint
-// to a single line so it never unexpectedly grows the layout.
-func shortHelpView(h help.Model, bindings []key.Binding) string {
-	v := h.ShortHelpView(bindings)
-	if idx := strings.LastIndex(v, "\n"); idx >= 0 {
-		if strings.TrimSpace(v[idx+1:]) == "…" {
-			v = v[:idx]
-		}
-	}
-	return v
-}
-
 // viewHints renders the help line constrained to maxWidth.
 func (m Model) viewHints(maxWidth int) string {
 	h := m.help
@@ -718,16 +690,25 @@ func (m Model) viewHints(maxWidth int) string {
 			}
 			return "\n\n" + h.FullHelpView(groups)
 		}
-		// All other stages: single line using the full box width so it doesn't truncate.
+		// Two rows: nav/confirm stacked in the first column, rest alongside.
+		// This ensures all bindings are always visible regardless of box width.
 		h.Width = m.leftColW + m.rightContentW + 2
-		var bindings []key.Binding
+		var groups [][]key.Binding
 		switch m.page {
 		case pageEnvironment, pageQuickSetup:
-			bindings = []key.Binding{keyNav, keyConfirm, keyBack, keyTheme, keyHelpLess}
+			groups = [][]key.Binding{
+				{keyNav, keyConfirm},
+				{keyBack, keyTheme},
+				{keyHelpLess},
+			}
 		default: // pageWelcome
-			bindings = []key.Binding{keyNav, keyConfirm, keyQuit, keyTheme, keyHelpLess}
+			groups = [][]key.Binding{
+				{keyNav, keyConfirm},
+				{keyQuit, keyTheme},
+				{keyHelpLess},
+			}
 		}
-		return "\n\n" + shortHelpView(h, bindings)
+		return "\n\n" + h.FullHelpView(groups)
 	}
 
 	var bindings []key.Binding
@@ -740,7 +721,7 @@ func (m Model) viewHints(maxWidth int) string {
 		bindings = []key.Binding{keyQuit, keyHelpMore}
 	}
 	themeName := mutedStyle.Render("  [" + Themes[m.themeIdx].Name + "]")
-	return "\n\n" + shortHelpView(h, bindings) + themeName
+	return "\n\n" + h.ShortHelpView(bindings) + themeName
 }
 
 // viewRight returns the system info table for the right column.

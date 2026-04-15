@@ -19,15 +19,15 @@ const (
 func (v VirtType) String() string {
 	switch v {
 	case VirtKVM:
-		return "KVM virtual machine"
+		return "KVM"
 	case VirtVMware:
-		return "VMware virtual machine"
+		return "VMware"
 	case VirtVirtualBox:
-		return "VirtualBox virtual machine"
+		return "VirtualBox"
 	case VirtQEMU:
-		return "QEMU virtual machine"
+		return "QEMU"
 	case VirtXen:
-		return "Xen virtual machine"
+		return "Xen"
 	case VirtContainer:
 		return "Linux container"
 	case VirtNone:
@@ -41,7 +41,7 @@ func (v VirtType) String() string {
 type UseCase int
 
 const (
-	UseCaseVPS        UseCase = iota
+	UseCaseVPS UseCase = iota
 	UseCaseDevMachine
 )
 
