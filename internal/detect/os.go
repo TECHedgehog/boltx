@@ -45,4 +45,5 @@ type OSInfo struct {
 	IDLike     string // e.g. "debian" — parent family declared by the distro
 	Pkg        PackageManager
 	Hostname   string // current system hostname
+	IsRoot     bool   // true when the process is running as uid 0
 }

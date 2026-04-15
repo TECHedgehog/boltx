@@ -10,5 +10,6 @@ func DetectOS() OSInfo {
 	if h, err := os.Hostname(); err == nil {
 		info.Hostname = h
 	}
+	info.IsRoot = os.Getuid() == 0
 	return info
 }

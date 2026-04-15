@@ -23,15 +23,17 @@ var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
 // Key bindings shared across stages.
 var (
-	keyNav      = key.NewBinding(key.WithKeys("up", "down", "k", "j"), key.WithHelp("↑↓/jk", "navigate"))
-	keyTabNav   = key.NewBinding(key.WithKeys("left", "right", "h", "l"), key.WithHelp("←→/hl", "tab"))
-	keySelect   = key.NewBinding(key.WithKeys("enter", " "), key.WithHelp("enter/space", "toggle"))
-	keyConfirm  = key.NewBinding(key.WithKeys("enter", " "), key.WithHelp("enter", "confirm"))
-	keyBack     = key.NewBinding(key.WithKeys("q", "esc"), key.WithHelp("q/esc", "back"))
-	keyQuit     = key.NewBinding(key.WithKeys("q", "esc"), key.WithHelp("q/esc", "quit"))
-	keyHelpMore = key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "more"))
-	keyHelpLess = key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "less"))
-	keyTheme    = key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "theme"))
+	keyNav         = key.NewBinding(key.WithKeys("up", "down", "k", "j"), key.WithHelp("↑↓/jk", "navigate"))
+	keyTabNav      = key.NewBinding(key.WithKeys("left", "right", "h", "l"), key.WithHelp("←→/hl", "tab"))
+	keySelect      = key.NewBinding(key.WithKeys("enter", " "), key.WithHelp("enter/space", "toggle"))
+	keyConfirm     = key.NewBinding(key.WithKeys("enter", " "), key.WithHelp("enter", "confirm"))
+	keyBack        = key.NewBinding(key.WithKeys("q", "esc"), key.WithHelp("q/esc", "back"))
+	keyQuit        = key.NewBinding(key.WithKeys("q", "esc"), key.WithHelp("q/esc", "quit"))
+	keyHelpMore    = key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "more"))
+	keyHelpLess    = key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "less"))
+	keyTheme       = key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "theme"))
+	keyResetOption = key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "reset option"))
+	keyResetTab    = key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "reset tab"))
 )
 
 // maxOptionsPerPage is the maximum number of options shown per tab sub-page.
@@ -58,12 +60,13 @@ const (
 
 // CategoryOption is a single setting within a category page.
 type CategoryOption struct {
-	Label   string
-	Kind    OptionKind
-	Checked bool               // will this option be applied?
-	Default string             // detected current value (shown as placeholder)
-	Value   string             // user-supplied value; empty → use Default on apply
-	ApplyFn func(string) error // deferred to GO! tab; nil = not yet implemented
+	Label     string
+	Kind      OptionKind
+	Checked   bool               // will this option be applied?
+	Default   string             // detected current value (shown as placeholder)
+	Value     string             // user-supplied value; empty → use Default on apply
+	ApplyFn   func(string) error // deferred to GO! tab; nil = not yet implemented
+	NeedsRoot bool               // if true, hidden when not running as root
 }
 
 // CategoryPage groups related options under a category name.
@@ -82,27 +85,41 @@ func subPageCount(nOptions int) int {
 }
 
 // buildCategoryPages returns all category pages with defaults pre-filled for the given use case.
+// Options marked NeedsRoot are omitted when osInfo.IsRoot is false.
 func buildCategoryPages(_ detect.UseCase, osInfo detect.OSInfo) []CategoryPage {
 	placeholder := func(label string) CategoryOption {
 		return CategoryOption{Label: label, Kind: KindToggle}
 	}
+	filter := func(opts []CategoryOption) []CategoryOption {
+		if osInfo.IsRoot {
+			return opts
+		}
+		out := opts[:0:0]
+		for _, o := range opts {
+			if !o.NeedsRoot {
+				out = append(out, o)
+			}
+		}
+		return out
+	}
 	return []CategoryPage{
 		{
 			Name: "SYS",
-			Options: []CategoryOption{
+			Options: filter([]CategoryOption{
 				{
-					Label:   "Hostname",
-					Kind:    KindTextInput,
-					Default: osInfo.Hostname,
-					ApplyFn: func(v string) error { return apply.Hostname(v) },
+					Label:     "Hostname",
+					Kind:      KindTextInput,
+					Default:   osInfo.Hostname,
+					NeedsRoot: true,
+					ApplyFn:   func(v string) error { return apply.Hostname(v) },
 				},
-			},
+			}),
 		},
 		{
 			Name: "USR",
 			Options: []CategoryOption{
-				placeholder("Placeholder A"),
-				placeholder("Placeholder B"),
+				{Label: "Placeholder A", Kind: KindToggle, Checked: true, ApplyFn: func(_ string) error { return nil }},
+				{Label: "Placeholder B", Kind: KindToggle, Checked: true, ApplyFn: func(_ string) error { return nil }},
 				placeholder("Placeholder C"),
 			},
 		},
@@ -125,14 +142,16 @@ func buildCategoryPages(_ detect.UseCase, osInfo detect.OSInfo) []CategoryPage {
 		{
 			Name: "PKG",
 			Options: []CategoryOption{
-				placeholder("Placeholder A"),
-				placeholder("Placeholder B"),
-				placeholder("Placeholder C"),
+				{Label: "Placeholder A", Kind: KindToggle, Checked: true, ApplyFn: func(_ string) error { return nil }},
+				{Label: "Placeholder B", Kind: KindToggle, Checked: true, ApplyFn: func(_ string) error { return nil }},
+				{Label: "Placeholder C", Kind: KindToggle, Checked: true, ApplyFn: func(_ string) error { return nil }},
 			},
 		},
 		{
-			Name:    "RUN",
-			Options: []CategoryOption{},
+			Name: "RUN",
+			Options: []CategoryOption{
+				{Label: "Placeholder A", Kind: KindToggle, Checked: true, ApplyFn: func(_ string) error { return nil }},
+			},
 		},
 		{
 			Name:    "GO!",
@@ -145,6 +164,26 @@ func buildCategoryPages(_ detect.UseCase, osInfo detect.OSInfo) []CategoryPage {
 type detectDoneMsg struct {
 	env    detect.Environment
 	osInfo detect.OSInfo
+}
+
+// applyState tracks the lifecycle of the GO! apply pass.
+type applyState int
+
+const (
+	applyIdle    applyState = iota // waiting for user to confirm
+	applyRunning                   // background apply in progress
+	applyDone                      // apply finished; results available
+)
+
+// applyResult holds the outcome of one option's ApplyFn call.
+type applyResult struct {
+	label string
+	err   error
+}
+
+// applyDoneMsg is returned by doApplyAll when every ApplyFn has been called.
+type applyDoneMsg struct {
+	results []applyResult
 }
 
 // Model holds all TUI state.
@@ -178,6 +217,10 @@ type Model struct {
 	editingOption bool
 	textInput     textinput.Model
 
+	// GO! apply pass.
+	applyState   applyState
+	applyResults []applyResult
+
 	// Theme cycling — index into Themes slice, advanced by 't'.
 	themeIdx int
 
@@ -198,7 +241,7 @@ var useCaseOptions = []detect.UseCase{detect.UseCaseVPS, detect.UseCaseDevMachin
 // useCaseDescs summarises the pre-selected defaults for each use case,
 // shown as a hint below the radio option on the use case screen.
 var useCaseDescs = []string{
-	"Firewall, SSH hardening, server packages",
+	"Firewall, SSH hardening",
 	"Dev tools and common packages",
 }
 
@@ -242,6 +285,28 @@ func doDetect() tea.Msg {
 	}
 }
 
+// doApplyAll calls every checked option's ApplyFn in sequence and returns the
+// per-option results as an applyDoneMsg.
+func doApplyAll(pages []CategoryPage) tea.Cmd {
+	return func() tea.Msg {
+		var results []applyResult
+		for _, page := range pages {
+			for _, opt := range page.Options {
+				if !opt.Checked || opt.ApplyFn == nil {
+					continue
+				}
+				v := opt.Value
+				if v == "" {
+					v = opt.Default
+				}
+				err := opt.ApplyFn(v)
+				results = append(results, applyResult{label: opt.Label, err: err})
+			}
+		}
+		return applyDoneMsg{results: results}
+	}
+}
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 
@@ -251,11 +316,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m = computeLayout(m)
 
 	case spinner.TickMsg:
-		if m.detecting {
+		if m.detecting || m.applyState == applyRunning {
 			var cmd tea.Cmd
 			m.spinner, cmd = m.spinner.Update(msg)
 			return m, cmd
 		}
+
+	case applyDoneMsg:
+		m.applyState = applyDone
+		m.applyResults = msg.results
+		return m, nil
 
 	case detectDoneMsg:
 		m.detecting = false
@@ -304,6 +374,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "t":
 			m.themeIdx = (m.themeIdx + 1) % len(Themes)
 			applyTheme(Themes[m.themeIdx])
+
+		case "r":
+			if m.page == pageReview && !m.editingOption {
+				absIdx := m.tabSubPage*maxOptionsPerPage + m.categoryPageCursor
+				page := m.categoryPages[m.activeTab]
+				if absIdx < len(page.Options) {
+					opt := &m.categoryPages[m.activeTab].Options[absIdx]
+					opt.Value = ""
+				}
+			}
+
+		case "R":
+			if m.page == pageReview && !m.editingOption {
+				for i := range m.categoryPages[m.activeTab].Options {
+					m.categoryPages[m.activeTab].Options[i].Value = ""
+				}
+			}
 
 		case "q", "esc":
 			switch m.page {
@@ -436,7 +523,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					case KindTextInput:
 						ti := textinput.New()
 						ti.Placeholder = opt.Default
-						ti.SetValue(opt.Value)
+						editVal := opt.Value
+						if editVal == "" {
+							editVal = opt.Default
+						}
+						ti.SetValue(editVal)
 						ti.Focus()
 						m.textInput = ti
 						m.editingOption = true
@@ -444,7 +535,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						opt.Checked = !opt.Checked
 					}
 				} else {
-					// Confirm → GO! apply not yet built
+					if m.activeTab == tabIndexGO && m.applyState == applyIdle {
+						m.applyState = applyRunning
+						return m, tea.Batch(doApplyAll(m.categoryPages), m.spinner.Tick)
+					}
 				}
 			}
 		}
@@ -479,9 +573,10 @@ func computeLayout(m Model) Model {
 
 	// Stable vertical anchor.
 	// tallestBoxH covers the Packages tab (15 content lines) + topPad (1) +
-	// hints (3) + border (2) = 21, rounded up to 23 for the wider tab bar.
+	// blank line below separator (1) + hints (3) + border (2) = 22,
+	// rounded up to 24 for the wider tab bar.
 	if m.rightContentH > 0 {
-		const tallestBoxH = 23
+		const tallestBoxH = 24
 		refBoxH := max(m.rightContentH+6, tallestBoxH)
 		m.stableTop = max(0, (m.height-refBoxH)/2)
 	}
@@ -536,7 +631,7 @@ func (m Model) View() string {
 		// A purple │ is appended to every line instead, forming the vertical
 		// separator. Total line width = leftW+3 (same as with PaddingRight(1)).
 		aboveSepTop := strings.Repeat("\n", topPad) +
-			titleStyle.Render("boltx") + "\n" +
+			m.viewTitle() + "\n" +
 			subtitleStyle.Render("Review settings") + "\n\n" +
 			tabBarTopPart
 		regularBlock := lipgloss.NewStyle().PaddingLeft(2).Render(
@@ -571,7 +666,7 @@ func (m Model) View() string {
 		bodyBlock := lipgloss.NewStyle().
 			Width(bottomContentW).
 			PaddingLeft(2).PaddingRight(1).
-			Render(body + hints)
+			Render("\n" + body + hints)
 
 		box = boxStyle.Render(lipgloss.JoinVertical(lipgloss.Left, aboveRow, bodyBlock))
 
@@ -661,6 +756,17 @@ func (m Model) View() string {
 	return box
 }
 
+// viewTitle returns the "boltx" title with a privilege indicator suffix.
+// Not root: amber "· no sudo". Root: green "· ● sudo".
+func (m Model) viewTitle() string {
+	title := titleStyle.Render("boltx")
+	if !m.osInfo.IsRoot {
+		warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
+		return title + warnStyle.Render(" ● running without sudo")
+	}
+	return title + greenStyle.Render(" ● running with sudo")
+}
+
 // viewLeft returns the main interactive content for the left column (no hints).
 func (m Model) viewLeft() string {
 	switch m.page {
@@ -685,7 +791,7 @@ func (m Model) viewHints(maxWidth int) string {
 			// Three columns: navigation | actions | meta — max 2 rows total.
 			groups := [][]key.Binding{
 				{keyNav, keyTabNav},
-				{keySelect, keyBack},
+				{keySelect, keyBack, keyResetOption, keyResetTab},
 				{keyTheme, keyHelpLess},
 			}
 			return "\n\n" + h.FullHelpView(groups)
@@ -807,8 +913,8 @@ func buildInfoTable(env detect.Environment, osInfo detect.OSInfo) bubblesTable.M
 func (m Model) viewMenu() string {
 	var b strings.Builder
 
-	b.WriteString(titleStyle.Render("boltx") + "\n")
-	b.WriteString(subtitleStyle.Render("Easy first setup... and FAST!") + "\n\n")
+	b.WriteString(m.viewTitle() + "\n")
+	b.WriteString(subtitleStyle.Render("Easy first setup... and FAST!") + "\n\n\n")
 
 	for i, item := range menuItems {
 		cursor := noCursorStr
@@ -829,7 +935,7 @@ func (m Model) viewMenu() string {
 func (m Model) viewUseCase() string {
 	var b strings.Builder
 
-	b.WriteString(titleStyle.Render("boltx") + "\n")
+	b.WriteString(m.viewTitle() + "\n")
 	b.WriteString(subtitleStyle.Render("Environment") + "\n\n")
 
 	if m.detecting {
@@ -866,7 +972,7 @@ func (m Model) viewUseCase() string {
 func (m Model) viewApplyOrReview() string {
 	var b strings.Builder
 
-	b.WriteString(titleStyle.Render("boltx") + "\n")
+	b.WriteString(m.viewTitle() + "\n")
 	b.WriteString(subtitleStyle.Render("Quick setup") + "\n\n")
 
 	uc := useCaseOptions[m.useCaseCursor]
@@ -892,7 +998,7 @@ func (m Model) viewApplyOrReview() string {
 // full-width separator: title, subtitle, and the tab bar.
 func (m Model) viewCategoryReviewAboveSep() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("boltx") + "\n")
+	b.WriteString(m.viewTitle() + "\n")
 	b.WriteString(subtitleStyle.Render("Review settings") + "\n\n")
 	b.WriteString(m.viewTabBar())
 	return b.String()
@@ -903,6 +1009,10 @@ func (m Model) viewCategoryReviewAboveSep() string {
 // width for word-wrap; callers should pass bottomContentW when the body
 // spans the full inner width, or leftColW for the narrow fallback.
 func (m Model) viewCategoryReviewBody(maxWidth int) string {
+	if m.activeTab == tabIndexGO {
+		return m.viewGOBody(maxWidth)
+	}
+
 	var b strings.Builder
 	colW := maxWidth
 	if colW == 0 {
@@ -956,6 +1066,135 @@ func (m Model) viewCategoryReviewBody(maxWidth int) string {
 	return b.String()
 }
 
+// viewGOBody renders the GO! tab body across its three lifecycle states.
+func (m Model) viewGOBody(maxWidth int) string {
+	var b strings.Builder
+	errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444"))
+
+	switch m.applyState {
+	case applyRunning:
+		b.WriteString(m.spinner.View() + " Applying settings…\n")
+
+	case applyDone:
+		if len(m.applyResults) == 0 {
+			b.WriteString(mutedStyle.Render("Nothing was applied.") + "\n")
+			break
+		}
+		for _, r := range m.applyResults {
+			if r.err == nil {
+				b.WriteString(greenStyle.Render("✓ "+r.label) + "\n")
+			} else {
+				b.WriteString(errorStyle.Render("✗ "+r.label+": "+r.err.Error()) + "\n")
+			}
+		}
+
+	default: // applyIdle
+		b.WriteString(m.viewGOSummaryTable(maxWidth))
+	}
+
+	return b.String()
+}
+
+// viewGOSummaryTable renders a row of individual rounded mini-tables, one per
+// category, with 1-space gaps between them so they feel like floating cards.
+// Borders are accent-colored when the category has pending changes, muted otherwise.
+//
+//	╭─────╮ ╭─────╮ ╭─────╮ ╭─────╮ ╭─────╮ ╭─────╮
+//	│ SYS │ │ USR │ │ SEC │ │ NET │ │ PKG │ │ RUN │
+//	│  0  │ │  2  │ │  0  │ │  0  │ │  3  │ │  1  │
+//	╰─────╯ ╰─────╯ ╰─────╯ ╰─────╯ ╰─────╯ ╰─────╯
+//	Total: 6             ↵  Apply
+func (m Model) viewGOSummaryTable(maxWidth int) string {
+	var pages []CategoryPage
+	for _, p := range m.categoryPages {
+		if p.Name != "GO!" {
+			pages = append(pages, p)
+		}
+	}
+	if len(pages) == 0 {
+		return mutedStyle.Render("No categories.") + "\n"
+	}
+
+	const colW = 5 // inner cell width (must fit category name + padding)
+
+	// center pads s to exactly colW chars (ASCII-only content assumed).
+	center := func(s string) string {
+		pad := colW - len(s)
+		if pad <= 0 {
+			return s[:colW]
+		}
+		l := pad / 2
+		return strings.Repeat(" ", l) + s + strings.Repeat(" ", pad-l)
+	}
+
+	const boxLines = 4 // top + name + count + bottom
+	rows := make([][]string, len(pages))
+	total := 0
+
+	for i, p := range pages {
+		count := checkedCount(p)
+		total += count
+
+		var bst lipgloss.Style
+		if count > 0 {
+			bst = lipgloss.NewStyle().Foreground(Themes[m.themeIdx].Accent)
+		} else {
+			bst = mutedStyle
+		}
+		pipe := bst.Render("│")
+
+		s := fmt.Sprintf("%d", count)
+		var countCell string
+		if count > 0 {
+			countCell = greenStyle.Render(center(s))
+		} else {
+			countCell = mutedStyle.Render(center(s))
+		}
+
+		rows[i] = []string{
+			bst.Render("╭─────╮"),
+			pipe + normalStyle.Render(center(p.Name)) + pipe,
+			pipe + countCell + pipe,
+			bst.Render("╰─────╯"),
+		}
+	}
+
+	// Join all boxes horizontally line by line with 1-space gap.
+	lines := make([]string, boxLines)
+	for i, box := range rows {
+		for l := 0; l < boxLines; l++ {
+			if i > 0 {
+				lines[l] += " "
+			}
+			lines[l] += box[l]
+		}
+	}
+
+	// Center the card row within maxWidth.
+	tableW := lipgloss.Width(lines[0])
+	tablePad := max(0, (maxWidth-tableW)/2)
+	tablePrefix := strings.Repeat(" ", tablePad)
+
+	// Apply button: "↵  Apply N changes" centered within maxWidth.
+	var applyLabel string
+	if total == 1 {
+		applyLabel = fmt.Sprintf("↵  Apply %d change", total)
+	} else {
+		applyLabel = fmt.Sprintf("↵  Apply %d changes", total)
+	}
+	applyBtn := selectedStyle.Render(applyLabel)
+	btnPad := max(0, (maxWidth-lipgloss.Width(applyBtn))/2)
+	btnLine := strings.Repeat(" ", btnPad) + applyBtn
+
+	var b strings.Builder
+	for _, l := range lines {
+		b.WriteString(tablePrefix + l + "\n")
+	}
+	b.WriteString("\n")
+	b.WriteString(btnLine)
+	return b.String()
+}
+
 // viewCategoryReview is the fallback used before detection completes.
 func (m Model) viewCategoryReview() string {
 	return m.viewCategoryReviewAboveSep() + "\n\n" + m.viewCategoryReviewBody(m.leftColW)
@@ -966,6 +1205,18 @@ func (m Model) viewCategoryReview() string {
 // are 2 lines tall (top border, bottom connector). Bottom-aligning them makes
 // the active tab rise above the ghost tabs. All open bottoms connect to the
 // separator below.
+// checkedCount returns the number of checked options with a non-nil ApplyFn
+// in the given page — i.e. changes that will be applied on GO!.
+func checkedCount(page CategoryPage) int {
+	n := 0
+	for _, opt := range page.Options {
+		if opt.Checked && opt.ApplyFn != nil {
+			n++
+		}
+	}
+	return n
+}
+
 func (m Model) viewTabBar() string {
 	parts := make([]string, len(m.categoryPages))
 	for i, page := range m.categoryPages {
