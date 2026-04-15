@@ -637,11 +637,26 @@ func (m Model) View() string {
 			box = boxStyle.Render(lipgloss.JoinVertical(lipgloss.Left, topRow, bottomBlock))
 		} else {
 			hints = m.viewHints(leftW)
-			leftMainBlock := lipgloss.NewStyle().Width(leftW).Render(paddedLeft)
-			leftBlock := lipgloss.JoinVertical(lipgloss.Left, leftMainBlock, hints)
-			leftCol := lipgloss.NewStyle().PaddingLeft(2).PaddingRight(1).Render(leftBlock)
-			rightCol := lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1).Render(rightContent)
-			box = boxStyle.Render(lipgloss.JoinHorizontal(lipgloss.Top, leftCol, rightCol))
+			if lipgloss.Height(hints) > 3 {
+				// hints wrap at leftW (bubbles/help appended "..." which itself wraps);
+				// push to full-width bottom block so nothing is clipped.
+				topLeftBlock := lipgloss.NewStyle().Width(leftW).Render(paddedLeft)
+				topLeftCol := lipgloss.NewStyle().PaddingLeft(2).PaddingRight(1).Render(topLeftBlock)
+				topRightCol := lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1).Render(rightContent)
+				topRow := lipgloss.JoinHorizontal(lipgloss.Top, topLeftCol, topRightCol)
+				hints = m.viewHints(bottomContentW)
+				bottomBlock := lipgloss.NewStyle().
+					Width(bottomContentW).
+					PaddingLeft(2).PaddingRight(1).
+					Render(hints)
+				box = boxStyle.Render(lipgloss.JoinVertical(lipgloss.Left, topRow, bottomBlock))
+			} else {
+				leftMainBlock := lipgloss.NewStyle().Width(leftW).Render(paddedLeft)
+				leftBlock := lipgloss.JoinVertical(lipgloss.Left, leftMainBlock, hints)
+				leftCol := lipgloss.NewStyle().PaddingLeft(2).PaddingRight(1).Render(leftBlock)
+				rightCol := lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1).Render(rightContent)
+				box = boxStyle.Render(lipgloss.JoinHorizontal(lipgloss.Top, leftCol, rightCol))
+			}
 		}
 
 	default:
@@ -739,16 +754,22 @@ func buildInfoTable(env detect.Environment, osInfo detect.OSInfo) bubblesTable.M
 	type kv struct{ k, v string }
 	var data []kv
 
-	if osInfo.PrettyName != "" {
-		data = append(data, kv{"OS", osInfo.PrettyName})
+	osName := osInfo.PrettyName
+	if osName == "" {
+		osName = "—"
 	}
+	data = append(data, kv{"OS", osName})
 	data = append(data, kv{"Virt", env.Virt.String()})
-	if osInfo.Pkg != detect.PkgUnknown {
-		data = append(data, kv{"Pkg", osInfo.Pkg.String()})
+	pkgName := osInfo.Pkg.String()
+	if osInfo.Pkg == detect.PkgUnknown {
+		pkgName = "—"
 	}
+	data = append(data, kv{"Pkg", pkgName})
+	sshVal := "no"
 	if env.ViaSSH {
-		data = append(data, kv{"SSH", "connected"})
+		sshVal = "connected"
 	}
+	data = append(data, kv{"SSH", sshVal})
 	ipVal := "private"
 	if env.HasPublicIP {
 		ipVal = "public"
