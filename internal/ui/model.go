@@ -56,17 +56,19 @@ type OptionKind int
 const (
 	KindToggle    OptionKind = iota // checkbox on/off — no extra component
 	KindTextInput                   // single-line text, backed by bubbles/textinput
+	KindSelect                      // pick from a list; items stored in SelectItems
 )
 
 // CategoryOption is a single setting within a category page.
 type CategoryOption struct {
-	Label     string
-	Kind      OptionKind
-	Checked   bool               // will this option be applied?
-	Default   string             // detected current value (shown as placeholder)
-	Value     string             // user-supplied value; empty → use Default on apply
-	ApplyFn   func(string) error // deferred to GO! tab; nil = not yet implemented
-	NeedsRoot bool               // if true, hidden when not running as root
+	Label       string
+	Kind        OptionKind
+	Checked     bool               // will this option be applied?
+	Default     string             // detected current value (shown as placeholder)
+	Value       string             // user-supplied value; empty → use Default on apply
+	ApplyFn     func(string) error // deferred to GO! tab; nil = not yet implemented
+	NeedsRoot   bool               // if true, hidden when not running as root
+	SelectItems []string           // valid choices for KindSelect; populated at build time
 }
 
 // CategoryPage groups related options under a category name.
@@ -112,6 +114,14 @@ func buildCategoryPages(_ detect.UseCase, osInfo detect.OSInfo) []CategoryPage {
 					Default:   osInfo.Hostname,
 					NeedsRoot: true,
 					ApplyFn:   func(v string) error { return apply.Hostname(v) },
+				},
+				{
+					Label:       "Locale",
+					Kind:        KindSelect,
+					Default:     osInfo.Locale,
+					NeedsRoot:   true,
+					SelectItems: detect.DetectLocales(),
+					ApplyFn:     func(v string) error { return apply.Locale(v) },
 				},
 			}),
 		},
@@ -212,10 +222,16 @@ type Model struct {
 	tabSubPage         int // sub-page within the active tab (for overflow)
 	categoryPageCursor int // cursor position within the current sub-page
 
-	// Option editing — active while a KindTextInput (or future kind) is being edited.
+	// Option editing — active while a KindTextInput is being edited.
 	// Only one option can be edited at a time.
 	editingOption bool
 	textInput     textinput.Model
+
+	// Option selecting — active while a KindSelect picker is open.
+	selectingOption bool
+	selectItems     []string // items shown in the picker
+	selectCursor    int      // index of highlighted item
+	selectViewport  int      // index of first visible item
 
 	// GO! apply pass.
 	applyState   applyState
@@ -344,8 +360,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m = computeLayout(m)
 
 	case tea.KeyMsg:
-		// While a KindTextInput (or future kind) is open, forward all keys to
-		// the active component. Only Enter and Esc are handled specially here.
+		// While a KindSelect picker is open, intercept navigation keys.
+		if m.selectingOption {
+			const visibleItems = 5
+			switch msg.String() {
+			case "up", "k":
+				if m.selectCursor > 0 {
+					m.selectCursor--
+					if m.selectCursor < m.selectViewport {
+						m.selectViewport = m.selectCursor
+					}
+				}
+			case "down", "j":
+				if m.selectCursor < len(m.selectItems)-1 {
+					m.selectCursor++
+					if m.selectCursor >= m.selectViewport+visibleItems {
+						m.selectViewport = m.selectCursor - visibleItems + 1
+					}
+				}
+			case "enter", " ":
+				absIdx := m.tabSubPage*maxOptionsPerPage + m.categoryPageCursor
+				opt := &m.categoryPages[m.activeTab].Options[absIdx]
+				opt.Value = m.selectItems[m.selectCursor]
+				opt.Checked = true
+				m.selectingOption = false
+			case "esc", "q":
+				m.selectingOption = false
+			}
+			return m, nil
+		}
+
+		// While a KindTextInput is open, forward all keys to the active component.
+		// Only Enter and Esc are handled specially here.
 		if m.editingOption {
 			switch msg.String() {
 			case "enter":
@@ -531,6 +577,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						ti.Focus()
 						m.textInput = ti
 						m.editingOption = true
+					case KindSelect:
+						m.selectItems = opt.SelectItems
+						// Start cursor on the current value (or default).
+						current := opt.Value
+						if current == "" {
+							current = opt.Default
+						}
+						m.selectCursor = 0
+						for i, item := range m.selectItems {
+							if item == current {
+								m.selectCursor = i
+								break
+							}
+						}
+						const visibleItems = 5
+						m.selectViewport = max(0, m.selectCursor-visibleItems/2)
+						m.selectingOption = true
 					default: // KindToggle
 						opt.Checked = !opt.Checked
 					}
@@ -1049,6 +1112,27 @@ func (m Model) viewCategoryReviewBody(maxWidth int) string {
 			if isCursor && m.editingOption {
 				indent := strings.Repeat(" ", lipgloss.Width(cursor+kindTextInputMarker))
 				b.WriteString(indent + m.textInput.View() + "\n")
+			}
+		case KindSelect:
+			displayVal := opt.Value
+			if displayVal == "" {
+				displayVal = opt.Default
+			}
+			b.WriteString(renderOptionLine(cursor, kindSelectMarker, opt.Label+": ", itemStyle, colW))
+			b.WriteString(mutedStyle.Render(displayVal) + "\n")
+			// When this option is being selected, render the inline picker below it.
+			if isCursor && m.selectingOption {
+				const visibleItems = 5
+				indent := strings.Repeat(" ", lipgloss.Width(cursor+kindSelectMarker))
+				end := min(m.selectViewport+visibleItems, len(m.selectItems))
+				for idx := m.selectViewport; idx < end; idx++ {
+					item := m.selectItems[idx]
+					if idx == m.selectCursor {
+						b.WriteString(indent + selectedStyle.Render("› "+item) + "\n")
+					} else {
+						b.WriteString(indent + mutedStyle.Render("  "+item) + "\n")
+					}
+				}
 			}
 		default: // KindToggle
 			radio := radioOff

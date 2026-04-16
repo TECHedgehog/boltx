@@ -5,6 +5,8 @@ package detect
 import (
 	"bufio"
 	"os"
+	"os/exec"
+	"sort"
 	"strings"
 )
 
@@ -22,7 +24,73 @@ func DetectOS() OSInfo {
 		info.Hostname = h
 	}
 	info.IsRoot = os.Getuid() == 0
+	info.Locale = detectLocale()
 	return info
+}
+
+// detectLocale returns the current locale string.
+// Reads LANG env first; falls back to parsing /etc/default/locale.
+func detectLocale() string {
+	if lang := os.Getenv("LANG"); lang != "" {
+		return lang
+	}
+	f, err := os.Open("/etc/default/locale")
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "LANG=") {
+			return strings.Trim(strings.TrimPrefix(line, "LANG="), `"'`)
+		}
+	}
+	return ""
+}
+
+// DetectLocales returns a sorted list of available locales on the system.
+// Tries localectl list-locales first, then locale -a, then returns a minimal
+// hardcoded list if both fail or return nothing.
+func DetectLocales() []string {
+	if out, err := exec.Command("localectl", "list-locales").Output(); err == nil {
+		if items := parseLines(string(out)); len(items) > 0 {
+			return items
+		}
+	}
+	if out, err := exec.Command("locale", "-a").Output(); err == nil {
+		if items := parseLines(string(out)); len(items) > 0 {
+			return items
+		}
+	}
+	return []string{
+		"C.UTF-8",
+		"en_US.UTF-8",
+		"en_GB.UTF-8",
+		"de_DE.UTF-8",
+		"es_ES.UTF-8",
+		"fr_FR.UTF-8",
+		"it_IT.UTF-8",
+		"ja_JP.UTF-8",
+		"pt_BR.UTF-8",
+		"zh_CN.UTF-8",
+	}
+}
+
+// parseLines splits output into trimmed, non-empty lines, deduped and sorted.
+func parseLines(out string) []string {
+	seen := make(map[string]bool)
+	var result []string
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || seen[line] {
+			continue
+		}
+		seen[line] = true
+		result = append(result, line)
+	}
+	sort.Strings(result)
+	return result
 }
 
 // parseOSRelease reads /etc/os-release and returns key=value pairs.

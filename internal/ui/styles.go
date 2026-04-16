@@ -76,4 +76,5 @@ var (
 	radioOn            = "● "
 	radioOff           = "○ "
 	kindTextInputMarker = "▶ " // 2-cell width, same as radioOn/radioOff
+	kindSelectMarker    = "≡ " // 2-cell width, same as radioOn/radioOff
 )
