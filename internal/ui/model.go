@@ -262,8 +262,8 @@ var useCaseDescs = []string{
 }
 
 var applyOrReviewOptions = []string{
-	"Apply recommended settings",
-	"Review and customize",
+	"Recommended setup",
+	"Custom setup",
 }
 
 // NewModel returns the initial model.
@@ -663,6 +663,9 @@ func (m Model) View() string {
 
 	const topPad = 1
 	paddedLeft := strings.Repeat("\n", topPad) + leftMain
+	if m.page != pageReview {
+		paddedLeft += "\n"
+	}
 
 	// leftCol outer = leftW + PaddingLeft(2) + PaddingRight(1) = leftW + 3
 	// rightCol outer = rightContentW + PaddingLeft(1) + PaddingRight(1) = rightContentW + 2
@@ -726,12 +729,18 @@ func (m Model) View() string {
 
 		body := m.viewCategoryReviewBody(bottomContentW)
 		hints := m.viewHints(bottomContentW)
+		innerW := bottomContentW + 3
+		sepLine := lipgloss.NewStyle().Foreground(Themes[m.themeIdx].Accent).Render(strings.Repeat("─", innerW))
 		bodyBlock := lipgloss.NewStyle().
 			Width(bottomContentW).
 			PaddingLeft(2).PaddingRight(1).
-			Render("\n" + body + hints)
+			Render("\n" + body)
+		hintsBlock := lipgloss.NewStyle().
+			Width(bottomContentW).
+			PaddingLeft(2).PaddingRight(1).
+			Render(strings.TrimLeft(hints, "\n"))
 
-		box = boxStyle.Render(lipgloss.JoinVertical(lipgloss.Left, aboveRow, bodyBlock))
+		box = boxStyle.Render(lipgloss.JoinVertical(lipgloss.Left, aboveRow, bodyBlock, sepLine, hintsBlock))
 
 		// Insert ╮ into the top border directly above the │ separator column.
 		// The separator is at inner-content column leftW+2; top-border rune
@@ -754,6 +763,7 @@ func (m Model) View() string {
 					boxLines[connectorRowIdx] = raw[:idx] + "├" + raw[idx+len("│"):]
 				}
 			}
+			boxLines = injectHintsSep(boxLines)
 			box = strings.Join(boxLines, "\n")
 		}
 
@@ -771,45 +781,63 @@ func (m Model) View() string {
 		topRow := lipgloss.JoinHorizontal(lipgloss.Top, topLeftCol, topRightCol)
 
 		hints := m.viewHints(bottomContentW)
+		innerW := bottomContentW + 3
+		sepLine := lipgloss.NewStyle().Foreground(Themes[m.themeIdx].Accent).Render(strings.Repeat("─", innerW))
 		bottomBlock := lipgloss.NewStyle().
 			Width(bottomContentW).
 			PaddingLeft(2).PaddingRight(1).
-			Render(bottomLeft + hints)
+			Render(bottomLeft)
+		hintsBlock := lipgloss.NewStyle().
+			Width(bottomContentW).
+			PaddingLeft(2).PaddingRight(1).
+			Render(strings.TrimLeft(hints, "\n"))
 
-		box = boxStyle.Render(lipgloss.JoinVertical(lipgloss.Left, topRow, bottomBlock))
+		box = boxStyle.Render(lipgloss.JoinVertical(lipgloss.Left, topRow, bottomBlock, sepLine, hintsBlock))
+		boxLines := strings.Split(box, "\n")
+		boxLines = injectHintsSep(boxLines)
+		box = strings.Join(boxLines, "\n")
 
 	case m.rightContentW > 0:
 		// Left content fits beside the table (leftH <= rightH).
-		// Check whether hints would extend below the table's bottom edge; if so,
-		// render them full-width in a bottom block instead of in the narrow left column.
+		// Always render hints full-width below the table with a separator.
+		topLeftBlock := lipgloss.NewStyle().Width(leftW).Render(paddedLeft)
+		topLeftCol := lipgloss.NewStyle().PaddingLeft(2).PaddingRight(1).Render(topLeftBlock)
+		topRightCol := lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1).Render(rightContent)
+		topRow := lipgloss.JoinHorizontal(lipgloss.Top, topLeftCol, topRightCol)
+
 		hints := m.viewHints(bottomContentW)
-		if leftH+lipgloss.Height(hints) > rightH {
-			topLeftBlock := lipgloss.NewStyle().Width(leftW).Render(paddedLeft)
-			topLeftCol := lipgloss.NewStyle().PaddingLeft(2).PaddingRight(1).Render(topLeftBlock)
-			topRightCol := lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1).Render(rightContent)
-			topRow := lipgloss.JoinHorizontal(lipgloss.Top, topLeftCol, topRightCol)
-			bottomBlock := lipgloss.NewStyle().
-				Width(bottomContentW).
-				PaddingLeft(2).PaddingRight(1).
-				Render(hints)
-			box = boxStyle.Render(lipgloss.JoinVertical(lipgloss.Left, topRow, bottomBlock))
-		} else {
-			hints = m.viewHints(leftW)
-			leftMainBlock := lipgloss.NewStyle().Width(leftW).Render(paddedLeft)
-			leftBlock := lipgloss.JoinVertical(lipgloss.Left, leftMainBlock, hints)
-			leftCol := lipgloss.NewStyle().PaddingLeft(2).PaddingRight(1).Render(leftBlock)
-			rightCol := lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1).Render(rightContent)
-			box = boxStyle.Render(lipgloss.JoinHorizontal(lipgloss.Top, leftCol, rightCol))
-		}
+		innerW := bottomContentW + 3
+		sepLine := lipgloss.NewStyle().Foreground(Themes[m.themeIdx].Accent).Render(strings.Repeat("─", innerW))
+		hintsBlock := lipgloss.NewStyle().
+			Width(bottomContentW).
+			PaddingLeft(2).PaddingRight(1).
+			Render(strings.TrimLeft(hints, "\n"))
+
+		box = boxStyle.Render(lipgloss.JoinVertical(lipgloss.Left, topRow, sepLine, hintsBlock))
+		boxLines := strings.Split(box, "\n")
+		boxLines = injectHintsSep(boxLines)
+		box = strings.Join(boxLines, "\n")
 
 	default:
 		// Detecting or no right content yet: single-column layout.
-		hints := m.viewHints(leftW)
 		leftMainBlock := lipgloss.NewStyle().Width(leftW).Render(paddedLeft)
-		leftBlock := lipgloss.JoinVertical(lipgloss.Left, leftMainBlock, hints)
-		leftCol := lipgloss.NewStyle().PaddingLeft(2).PaddingRight(1).Render(leftBlock)
+		leftCol := lipgloss.NewStyle().PaddingLeft(2).PaddingRight(1).Render(leftMainBlock)
 		rightCol := lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1).Render(rightContent)
-		box = boxStyle.Render(lipgloss.JoinHorizontal(lipgloss.Top, leftCol, rightCol))
+		topRow := lipgloss.JoinHorizontal(lipgloss.Top, leftCol, rightCol)
+
+		innerW := lipgloss.Width(topRow)
+		sepLine := lipgloss.NewStyle().Foreground(Themes[m.themeIdx].Accent).Render(strings.Repeat("─", innerW))
+		hintsW := innerW - 3
+		hints := m.viewHints(hintsW)
+		hintsBlock := lipgloss.NewStyle().
+			Width(hintsW).
+			PaddingLeft(2).PaddingRight(1).
+			Render(strings.TrimLeft(hints, "\n"))
+
+		box = boxStyle.Render(lipgloss.JoinVertical(lipgloss.Left, topRow, sepLine, hintsBlock))
+		boxLines := strings.Split(box, "\n")
+		boxLines = injectHintsSep(boxLines)
+		box = strings.Join(boxLines, "\n")
 	}
 
 	if m.width > 0 && m.height > 0 {
@@ -1350,6 +1378,40 @@ func syncPkgTab(pages []CategoryPage) []CategoryPage { return pages }
 // syncRunTab rebuilds the RUN tab based on what was selected in other tabs.
 // Stub — logic added when RUN options are implemented.
 func syncRunTab(pages []CategoryPage) []CategoryPage { return pages }
+
+// injectHintsSep scans the rendered box lines for a full-width all-dashes line
+// (│─────────│) and replaces the border chars with ├ and ┤ to make it look
+// like a proper cross-section connector.
+func injectHintsSep(boxLines []string) []string {
+	for i, line := range boxLines {
+		stripped := ansiEscape.ReplaceAllString(line, "")
+		runes := []rune(stripped)
+		if len(runes) < 3 || runes[0] != '│' || runes[len(runes)-1] != '│' {
+			continue
+		}
+		allDashes := true
+		for _, r := range runes[1 : len(runes)-1] {
+			if r != '─' {
+				allDashes = false
+				break
+			}
+		}
+		if !allDashes {
+			continue
+		}
+		// Replace first │ with ├ and last │ with ┤ in the raw (ANSI) string.
+		first := strings.Index(line, "│")
+		if first >= 0 {
+			line = line[:first] + "├" + line[first+len("│"):]
+		}
+		last := strings.LastIndex(line, "│")
+		if last >= 0 {
+			line = line[:last] + "┤" + line[last+len("│"):]
+		}
+		boxLines[i] = line
+	}
+	return boxLines
+}
 
 // renderOptionLine renders one option row with word-wrap when the label is
 // too wide for maxWidth. Continuation lines are indented to align with the

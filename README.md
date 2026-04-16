@@ -6,7 +6,7 @@ A TUI tool for setting up Linux systems. Built for newcomers and experienced use
 
 ## Status
 
-Early development — core navigation and configuration selection are working, but changes cannot be applied yet.
+Early development — SYS tab options (hostname, locale) are fully implemented and applied on GO!. Other tabs are stubs. UI includes theme cycling, a full-width separator above the help line, and root/non-root detection.
 
 ## Categories
 
@@ -33,7 +33,9 @@ The review screen is organised into tabs:
 |-----|--------|
 | `↑↓` / `jk` | Navigate |
 | `←→` / `hl` | Switch tabs (review screen) |
-| `enter` / `space` | Select / toggle |
+| `enter` / `space` | Select / toggle option |
+| `r` | Reset current option to default |
+| `R` | Reset all options in current tab |
 | `t` | Cycle theme (Purple → Teal → Amber) |
 | `?` | Toggle help |
 | `q` / `esc` | Back / quit |
