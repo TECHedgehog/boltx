@@ -4,8 +4,62 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
 )
+
+// hostnameLabel matches a single RFC 1123 label: starts and ends with
+// alphanumeric, may contain hyphens in the middle, 1–63 chars.
+var hostnameLabel = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$`)
+
+// localeRe matches the standard locale identifier formats:
+//
+//	language[_territory][.codeset][@modifier]   e.g. en_US.UTF-8, fr_FR, de@euro
+var localeRe = regexp.MustCompile(`^[a-zA-Z]{2,3}(_[A-Z]{2,3})?(\.[A-Za-z0-9-]+)?(@[A-Za-z0-9]+)?$`)
+
+func validateHostname(name string) error {
+	if len(name) > 253 {
+		return fmt.Errorf("hostname too long (%d chars, max 253)", len(name))
+	}
+	for _, label := range strings.Split(name, ".") {
+		if label == "" {
+			return fmt.Errorf("hostname has empty label (leading/trailing dot or consecutive dots)")
+		}
+		if len(label) > 63 {
+			return fmt.Errorf("hostname label %q too long (%d chars, max 63)", label, len(label))
+		}
+		if !hostnameLabel.MatchString(label) {
+			return fmt.Errorf("hostname label %q contains invalid characters (only a-z, A-Z, 0-9, hyphen allowed; no leading/trailing hyphen)", label)
+		}
+	}
+	return nil
+}
+
+func validateLocale(locale string) error {
+	if strings.HasPrefix(locale, "LANG=") {
+		return fmt.Errorf("locale must not include LANG= prefix (got %q)", locale)
+	}
+	if locale == "C" || locale == "POSIX" {
+		return nil
+	}
+	if !localeRe.MatchString(locale) {
+		return fmt.Errorf("invalid locale format %q (expected e.g. en_US.UTF-8)", locale)
+	}
+	return nil
+}
+
+func validateTimezone(zone string) error {
+	if strings.ContainsAny(zone, " \t\n\r") {
+		return fmt.Errorf("timezone must not contain whitespace")
+	}
+	// Guard the fallback path against path traversal.
+	zoneFile := "/usr/share/zoneinfo/" + zone
+	if clean := filepath.Clean(zoneFile); !strings.HasPrefix(clean, "/usr/share/zoneinfo/") {
+		return fmt.Errorf("invalid timezone %q (path traversal detected)", zone)
+	}
+	return nil
+}
 
 // Locale sets the system locale (LANG variable).
 // Tries localectl set-locale first (systemd); falls back to writing /etc/default/locale.
@@ -14,6 +68,9 @@ func Locale(locale string) error {
 	locale = strings.TrimSpace(locale)
 	if locale == "" {
 		return fmt.Errorf("locale cannot be empty")
+	}
+	if err := validateLocale(locale); err != nil {
+		return err
 	}
 
 	if _, err := exec.LookPath("localectl"); err == nil {
@@ -39,6 +96,9 @@ func Timezone(zone string) error {
 	zone = strings.TrimSpace(zone)
 	if zone == "" {
 		return fmt.Errorf("timezone cannot be empty")
+	}
+	if err := validateTimezone(zone); err != nil {
+		return err
 	}
 
 	if _, err := exec.LookPath("timedatectl"); err == nil {
@@ -75,6 +135,9 @@ func Hostname(name string) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return fmt.Errorf("hostname cannot be empty")
+	}
+	if err := validateHostname(name); err != nil {
+		return err
 	}
 
 	// systemd path — available on Ubuntu, Fedora, Arch, Debian, etc.

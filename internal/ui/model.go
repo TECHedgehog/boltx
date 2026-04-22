@@ -131,6 +131,7 @@ func buildCategoryPages(_ detect.UseCase, osInfo detect.OSInfo) []CategoryPage {
 					SelectItems: detect.DetectTimezones(),
 					ApplyFn:     func(v string) error { return apply.Timezone(v) },
 				},
+
 			}),
 		},
 		{
@@ -203,6 +204,7 @@ type applyResult struct {
 type applyDoneMsg struct {
 	results []applyResult
 }
+
 
 // Model holds all TUI state.
 type Model struct {
@@ -350,6 +352,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyState = applyDone
 		m.applyResults = msg.results
 		return m, nil
+
 
 	case detectDoneMsg:
 		m.detecting = false
