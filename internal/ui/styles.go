@@ -39,7 +39,6 @@ func applyTheme(t Theme) {
 	normalStyle   = lipgloss.NewStyle().Foreground(t.Text)
 	mutedStyle    = lipgloss.NewStyle().Foreground(t.Muted)
 	greenStyle    = lipgloss.NewStyle().Foreground(t.Success)
-	sectionStyle  = lipgloss.NewStyle().Bold(true).Foreground(t.Text)
 	boxStyle = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(t.Accent)
@@ -66,7 +65,6 @@ var (
 	normalStyle          lipgloss.Style
 	mutedStyle           lipgloss.Style
 	greenStyle           lipgloss.Style
-	sectionStyle         lipgloss.Style
 	boxStyle             lipgloss.Style
 	infoTableBorderStyle lipgloss.Style
 	activeTabStyle       lipgloss.Style

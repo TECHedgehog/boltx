@@ -330,13 +330,22 @@ func doDetect() tea.Msg {
 	}
 }
 
+// newPasswordInput returns a focused password textinput with the given prompt.
+func newPasswordInput(prompt string) textinput.Model {
+	ti := textinput.New()
+	ti.Prompt = prompt
+	ti.EchoMode = textinput.EchoPassword
+	ti.Focus()
+	return ti
+}
+
 // doApplyAll calls every checked option's ApplyFn in sequence and returns the
 // per-option results as an applyDoneMsg.
 func doApplyAll(pages []CategoryPage) tea.Cmd {
 	return func() tea.Msg {
 		var results []applyResult
-		for _, page := range pages {
-			for _, opt := range page.Options {
+		for _, pg := range pages {
+			for _, opt := range pg.Options {
 				if !opt.Checked || opt.ApplyFn == nil {
 					continue
 				}
@@ -438,11 +447,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 						m.subValues[0] = val
 						m.inputSubStep = 1
-						ti := textinput.New()
-						ti.Prompt = "Password:  "
-						ti.EchoMode = textinput.EchoPassword
-						ti.Focus()
-						m.textInput = ti
+						m.textInput = newPasswordInput("Password:  ")
 					case 1: // password
 						if val == "" {
 							m.inputError = "password cannot be empty"
@@ -450,20 +455,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 						m.subValues[1] = val
 						m.inputSubStep = 2
-						ti := textinput.New()
-						ti.Prompt = "Confirm:   "
-						ti.EchoMode = textinput.EchoPassword
-						ti.Focus()
-						m.textInput = ti
+						m.textInput = newPasswordInput("Confirm:   ")
 					case 2: // confirm
 						if val != m.subValues[1] {
 							m.inputError = "passwords do not match"
 							m.inputSubStep = 1
-							ti := textinput.New()
-							ti.Prompt = "Password:  "
-							ti.EchoMode = textinput.EchoPassword
-							ti.Focus()
-							m.textInput = ti
+							m.textInput = newPasswordInput("Password:  ")
 							return m, nil
 						}
 						opt.Value = m.subValues[0] + "\n" + m.subValues[1]
