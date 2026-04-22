@@ -66,9 +66,10 @@ type CategoryOption struct {
 	Checked     bool               // will this option be applied?
 	Default     string             // detected current value (shown as placeholder)
 	Value       string             // user-supplied value; empty → use Default on apply
-	ApplyFn     func(string) error // deferred to GO! tab; nil = not yet implemented
-	NeedsRoot   bool               // if true, hidden when not running as root
-	SelectItems []string           // valid choices for KindSelect; populated at build time
+	ApplyFn        func(string) error // deferred to GO! tab; nil = not yet implemented
+	NeedsRoot      bool               // if true, hidden when not running as root
+	SelectItems    []string           // valid choices for KindSelect; populated at build time
+	PasswordConfirm bool              // if true, KindTextInput collects password + confirm after the value
 }
 
 // CategoryPage groups related options under a category name.
@@ -136,11 +137,24 @@ func buildCategoryPages(_ detect.UseCase, osInfo detect.OSInfo) []CategoryPage {
 		},
 		{
 			Name: "USR",
-			Options: []CategoryOption{
-				{Label: "Placeholder A", Kind: KindToggle, Checked: true, ApplyFn: func(_ string) error { return nil }},
+			Options: filter([]CategoryOption{
+				{
+					Label:           "Create User",
+					Kind:            KindTextInput,
+					Default:         "",
+					NeedsRoot:       true,
+					PasswordConfirm: true,
+					ApplyFn: func(v string) error {
+						parts := strings.SplitN(v, "\n", 2)
+						if len(parts) != 2 {
+							return fmt.Errorf("missing password")
+						}
+						return apply.CreateUser(parts[0], parts[1])
+					},
+				},
 				{Label: "Placeholder B", Kind: KindToggle, Checked: true, ApplyFn: func(_ string) error { return nil }},
 				placeholder("Placeholder C"),
-			},
+			}),
 		},
 		{
 			Name: "SEC",
@@ -236,6 +250,11 @@ type Model struct {
 	// Only one option can be edited at a time.
 	editingOption bool
 	textInput     textinput.Model
+	// Multi-step input — used when opt.PasswordConfirm is true.
+	// Steps: 0=main value, 1=password, 2=confirm.
+	inputSubStep int
+	subValues    [3]string
+	inputError   string
 
 	// Option selecting — active while a KindSelect picker is open.
 	selectingOption bool
@@ -408,11 +427,61 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter":
 				absIdx := m.tabSubPage*maxOptionsPerPage + m.categoryPageCursor
 				opt := &m.categoryPages[m.activeTab].Options[absIdx]
-				opt.Value = m.textInput.Value()
-				opt.Checked = true
-				m.editingOption = false
+				if opt.PasswordConfirm {
+					val := m.textInput.Value()
+					m.inputError = ""
+					switch m.inputSubStep {
+					case 0: // username
+						if val == "" {
+							m.inputError = "username cannot be empty"
+							return m, nil
+						}
+						m.subValues[0] = val
+						m.inputSubStep = 1
+						ti := textinput.New()
+						ti.Prompt = "Password:  "
+						ti.EchoMode = textinput.EchoPassword
+						ti.Focus()
+						m.textInput = ti
+					case 1: // password
+						if val == "" {
+							m.inputError = "password cannot be empty"
+							return m, nil
+						}
+						m.subValues[1] = val
+						m.inputSubStep = 2
+						ti := textinput.New()
+						ti.Prompt = "Confirm:   "
+						ti.EchoMode = textinput.EchoPassword
+						ti.Focus()
+						m.textInput = ti
+					case 2: // confirm
+						if val != m.subValues[1] {
+							m.inputError = "passwords do not match"
+							m.inputSubStep = 1
+							ti := textinput.New()
+							ti.Prompt = "Password:  "
+							ti.EchoMode = textinput.EchoPassword
+							ti.Focus()
+							m.textInput = ti
+							return m, nil
+						}
+						opt.Value = m.subValues[0] + "\n" + m.subValues[1]
+						opt.Checked = true
+						m.editingOption = false
+						m.inputSubStep = 0
+						m.subValues = [3]string{}
+					}
+				} else {
+					opt.Value = m.textInput.Value()
+					opt.Checked = true
+					m.editingOption = false
+				}
 			case "esc":
 				m.editingOption = false
+				m.inputSubStep = 0
+				m.subValues = [3]string{}
+				m.inputError = ""
 			default:
 				var cmd tea.Cmd
 				m.textInput, cmd = m.textInput.Update(msg)
@@ -579,12 +648,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					switch opt.Kind {
 					case KindTextInput:
 						ti := textinput.New()
-						ti.Placeholder = opt.Default
-						editVal := opt.Value
-						if editVal == "" {
-							editVal = opt.Default
+						if opt.PasswordConfirm {
+							m.inputSubStep = 0
+							m.subValues = [3]string{}
+							m.inputError = ""
+							ti.Prompt = "Username:  "
+							if opt.Value != "" {
+								ti.SetValue(strings.SplitN(opt.Value, "\n", 2)[0])
+							}
+						} else {
+							ti.Placeholder = opt.Default
+							editVal := opt.Value
+							if editVal == "" {
+								editVal = opt.Default
+							}
+							ti.SetValue(editVal)
 						}
-						ti.SetValue(editVal)
 						ti.Focus()
 						m.textInput = ti
 						m.editingOption = true
@@ -1150,12 +1229,19 @@ func (m Model) viewCategoryReviewBody(maxWidth int) string {
 			if displayVal == "" {
 				displayVal = opt.Default
 			}
+			// For PasswordConfirm options, only show the username portion.
+			if opt.PasswordConfirm && strings.Contains(displayVal, "\n") {
+				displayVal = strings.SplitN(displayVal, "\n", 2)[0]
+			}
 			b.WriteString(renderOptionLine(cursor, kindTextInputMarker, opt.Label+": ", itemStyle, colW))
 			b.WriteString(mutedStyle.Render(displayVal) + "\n")
 			// When this option is being edited, render the inline text input below it.
 			if isCursor && m.editingOption {
 				indent := strings.Repeat(" ", lipgloss.Width(cursor+kindTextInputMarker))
 				b.WriteString(indent + m.textInput.View() + "\n")
+				if m.inputError != "" {
+					b.WriteString(indent + lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Render("✗ "+m.inputError) + "\n")
+				}
 			}
 		case KindSelect:
 			displayVal := opt.Value
