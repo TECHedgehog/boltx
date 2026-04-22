@@ -47,4 +47,5 @@ type OSInfo struct {
 	Hostname   string // current system hostname
 	IsRoot     bool   // true when the process is running as uid 0
 	Locale     string // current locale, e.g. "en_US.UTF-8"
+	Timezone   string // current timezone, e.g. "Europe/Madrid"
 }

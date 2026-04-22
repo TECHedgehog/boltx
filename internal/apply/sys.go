@@ -31,6 +31,42 @@ func Locale(locale string) error {
 	return nil
 }
 
+// Timezone sets the system timezone.
+// Tries timedatectl set-timezone first (systemd); falls back to symlinking
+// /etc/localtime and writing /etc/timezone.
+// Requires root privileges.
+func Timezone(zone string) error {
+	zone = strings.TrimSpace(zone)
+	if zone == "" {
+		return fmt.Errorf("timezone cannot be empty")
+	}
+
+	if _, err := exec.LookPath("timedatectl"); err == nil {
+		out, err := exec.Command("timedatectl", "set-timezone", zone).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("timedatectl set-timezone: %w\n%s", err, strings.TrimSpace(string(out)))
+		}
+		// timedatectl updates /etc/localtime symlink but not /etc/timezone on all distros.
+		_ = os.WriteFile("/etc/timezone", []byte(zone+"\n"), 0644)
+		return nil
+	}
+
+	zoneFile := "/usr/share/zoneinfo/" + zone
+	if _, err := os.Stat(zoneFile); err != nil {
+		return fmt.Errorf("timezone file not found: %s", zoneFile)
+	}
+	if err := os.Remove("/etc/localtime"); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove /etc/localtime: %w", err)
+	}
+	if err := os.Symlink(zoneFile, "/etc/localtime"); err != nil {
+		return fmt.Errorf("symlink /etc/localtime: %w", err)
+	}
+	if err := os.WriteFile("/etc/timezone", []byte(zone+"\n"), 0644); err != nil {
+		return fmt.Errorf("write /etc/timezone: %w", err)
+	}
+	return nil
+}
+
 // Hostname sets the system hostname.
 // Tries hostnamectl first (systemd systems); falls back to writing /etc/hostname
 // and running hostname(1) directly (Alpine, minimal containers).

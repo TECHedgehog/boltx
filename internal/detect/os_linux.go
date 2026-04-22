@@ -25,7 +25,51 @@ func DetectOS() OSInfo {
 	}
 	info.IsRoot = os.Getuid() == 0
 	info.Locale = detectLocale()
+	info.Timezone = detectTimezone()
 	return info
+}
+
+// detectTimezone returns the current system timezone, e.g. "Europe/Madrid".
+// Reads /etc/timezone first; falls back to resolving the /etc/localtime symlink.
+func detectTimezone() string {
+	if data, err := os.ReadFile("/etc/timezone"); err == nil {
+		if tz := strings.TrimSpace(string(data)); tz != "" {
+			return tz
+		}
+	}
+	if link, err := os.Readlink("/etc/localtime"); err == nil {
+		const prefix = "/usr/share/zoneinfo/"
+		if idx := strings.Index(link, prefix); idx >= 0 {
+			return link[idx+len(prefix):]
+		}
+	}
+	return ""
+}
+
+// DetectTimezones returns a sorted list of available timezones on the system.
+// Tries timedatectl list-timezones first; falls back to a minimal hardcoded list.
+func DetectTimezones() []string {
+	if out, err := exec.Command("timedatectl", "list-timezones").Output(); err == nil {
+		if items := parseLines(string(out)); len(items) > 0 {
+			return items
+		}
+	}
+	return []string{
+		"Africa/Cairo",
+		"America/Chicago",
+		"America/Los_Angeles",
+		"America/New_York",
+		"America/Sao_Paulo",
+		"Asia/Kolkata",
+		"Asia/Shanghai",
+		"Asia/Tokyo",
+		"Australia/Sydney",
+		"Europe/Berlin",
+		"Europe/London",
+		"Europe/Madrid",
+		"Europe/Paris",
+		"UTC",
+	}
 }
 
 // detectLocale returns the current locale string.

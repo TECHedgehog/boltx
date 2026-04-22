@@ -123,6 +123,14 @@ func buildCategoryPages(_ detect.UseCase, osInfo detect.OSInfo) []CategoryPage {
 					SelectItems: detect.DetectLocales(),
 					ApplyFn:     func(v string) error { return apply.Locale(v) },
 				},
+				{
+					Label:       "Timezone",
+					Kind:        KindSelect,
+					Default:     osInfo.Timezone,
+					NeedsRoot:   true,
+					SelectItems: detect.DetectTimezones(),
+					ApplyFn:     func(v string) error { return apply.Timezone(v) },
+				},
 			}),
 		},
 		{
