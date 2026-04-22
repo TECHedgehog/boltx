@@ -609,9 +609,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						opt.Checked = !opt.Checked
 					}
 				} else {
-					if m.activeTab == tabIndexGO && m.applyState == applyIdle {
-						m.applyState = applyRunning
-						return m, tea.Batch(doApplyAll(m.categoryPages), m.spinner.Tick)
+					if m.activeTab == tabIndexGO {
+						switch m.applyState {
+						case applyIdle:
+							m.applyState = applyRunning
+							return m, tea.Batch(doApplyAll(m.categoryPages), m.spinner.Tick)
+						case applyDone:
+							return m, tea.Quit
+						}
 					}
 				}
 			}
@@ -1201,15 +1206,16 @@ func (m Model) viewGOBody(maxWidth int) string {
 	case applyDone:
 		if len(m.applyResults) == 0 {
 			b.WriteString(mutedStyle.Render("Nothing was applied.") + "\n")
-			break
-		}
-		for _, r := range m.applyResults {
-			if r.err == nil {
-				b.WriteString(greenStyle.Render("✓ "+r.label) + "\n")
-			} else {
-				b.WriteString(errorStyle.Render("✗ "+r.label+": "+r.err.Error()) + "\n")
+		} else {
+			for _, r := range m.applyResults {
+				if r.err == nil {
+					b.WriteString(greenStyle.Render("✓ "+r.label) + "\n")
+				} else {
+					b.WriteString(errorStyle.Render("✗ "+r.label+": "+r.err.Error()) + "\n")
+				}
 			}
 		}
+		b.WriteString("\n" + mutedStyle.Render("Press Enter or q to exit.") + "\n")
 
 	default: // applyIdle
 		b.WriteString(m.viewGOSummaryTable(maxWidth))
