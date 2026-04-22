@@ -6,7 +6,7 @@ A TUI tool for setting up Linux systems. Built for newcomers and experienced use
 
 ## Status
 
-Early development — SYS tab options (hostname, locale) are fully implemented and applied on GO!. Other tabs are stubs. UI includes theme cycling, a full-width separator above the help line, and root/non-root detection.
+Early development. SYS tab (hostname, locale, timezone) fully implemented with apply functions and validation. USR tab backend started (`CreateUser`). Other tabs are stubs. UI includes theme cycling, root/non-root detection, and an exit prompt after apply.
 
 ## Categories
 
@@ -14,7 +14,7 @@ The review screen is organised into tabs:
 
 | Tab | Description |
 |-----|-------------|
-| SYS | Hostname, locale, timezone |
+| SYS | Hostname, locale, timezone ✓ |
 | USR | Users (sudo, groups), SSH setup, shell, dotfiles |
 | SEC | Firewall (ufw), fail2ban, policies |
 | NET | Web servers (cockpit), proxy managers (traefik, nginx) |
@@ -46,9 +46,12 @@ The review screen is organised into tabs:
 - [x] Use case detection (VPS vs dev machine)
 - [x] Setup categories (authentication, security, packages, networking…)
 - [x] Per-category configuration steps (toggleable options with tab navigation)
-- [x] Review & Apply tab (final step, apply not yet wired)
+- [x] Review & Apply tab (GO! tab)
 - [x] Theme switching (`t` key, extensible)
-- [ ] Apply changes
+- [x] Apply SYS options (hostname, locale, timezone)
+- [x] Exit prompt after apply
+- [ ] Apply USR options (user creation in progress)
+- [ ] SEC, NET, PKG, RUN tab options
 
 ## Usage
 
