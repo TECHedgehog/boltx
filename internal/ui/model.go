@@ -59,24 +59,43 @@ const (
 	KindSelect                      // pick from a list; items stored in SelectItems
 )
 
+// UserEntry holds per-user configuration for the USR tab.
+type UserEntry struct {
+	Name     string
+	Password string
+	Sudo     bool
+	SSHKey   string
+}
+
+// Per-user option cursor positions within the USR tab body.
+const (
+	usrOptUsername = 0
+	usrOptPassword = 1
+	usrOptSudo     = 2
+	usrOptSSHKey   = 3
+	usrOptDelete   = 4
+	usrOptCount    = 5
+)
+
 // CategoryOption is a single setting within a category page.
 type CategoryOption struct {
-	Label       string
-	Kind        OptionKind
-	Checked     bool               // will this option be applied?
-	Default     string             // detected current value (shown as placeholder)
-	Value       string             // user-supplied value; empty → use Default on apply
-	ApplyFn        func(string) error // deferred to GO! tab; nil = not yet implemented
-	NeedsRoot      bool               // if true, hidden when not running as root
-	SelectItems    []string           // valid choices for KindSelect; populated at build time
-	PasswordConfirm bool              // if true, KindTextInput collects password + confirm after the value
+	Label           string
+	Kind            OptionKind
+	Checked         bool               // will this option be applied?
+	Default         string             // detected current value (shown as placeholder)
+	Value           string             // user-supplied value; empty → use Default on apply
+	ApplyFn         func(string) error // deferred to GO! tab; nil = not yet implemented
+	NeedsRoot       bool               // if true, hidden when not running as root
+	SelectItems     []string           // valid choices for KindSelect; populated at build time
+	PasswordConfirm bool               // if true, KindTextInput collects password + confirm after the value
 }
 
 // CategoryPage groups related options under a category name.
 type CategoryPage struct {
-	Name    string
-	Icon    string
-	Options []CategoryOption
+	Name        string
+	Icon        string
+	Options     []CategoryOption
+	UserEntries []UserEntry // USR tab only — users to be created
 }
 
 // subPageCount returns the number of sub-pages needed for nOptions.
@@ -132,29 +151,12 @@ func buildCategoryPages(_ detect.UseCase, osInfo detect.OSInfo) []CategoryPage {
 					SelectItems: detect.DetectTimezones(),
 					ApplyFn:     func(v string) error { return apply.Timezone(v) },
 				},
-
 			}),
 		},
 		{
-			Name: "USR",
-			Options: filter([]CategoryOption{
-				{
-					Label:           "Create User",
-					Kind:            KindTextInput,
-					Default:         "",
-					NeedsRoot:       true,
-					PasswordConfirm: true,
-					ApplyFn: func(v string) error {
-						parts := strings.SplitN(v, "\n", 2)
-						if len(parts) != 2 {
-							return fmt.Errorf("missing password")
-						}
-						return apply.CreateUser(parts[0], parts[1])
-					},
-				},
-				{Label: "Placeholder B", Kind: KindToggle, Checked: true, ApplyFn: func(_ string) error { return nil }},
-				placeholder("Placeholder C"),
-			}),
+			Name:        "USR",
+			Options:     []CategoryOption{},
+			UserEntries: []UserEntry{},
 		},
 		{
 			Name: "SEC",
@@ -219,7 +221,6 @@ type applyDoneMsg struct {
 	results []applyResult
 }
 
-
 // Model holds all TUI state.
 type Model struct {
 	width  int
@@ -255,6 +256,10 @@ type Model struct {
 	inputSubStep int
 	subValues    [3]string
 	inputError   string
+
+	// USR tab state — user sub-tabs and per-user editing.
+	usrSubTab       int // index into UserEntries; len(UserEntries) = "+ New User" tab
+	usrEditingField int // which per-user field is being edited (usrOpt* constants)
 
 	// Option selecting — active while a KindSelect picker is open.
 	selectingOption bool
@@ -345,6 +350,10 @@ func doApplyAll(pages []CategoryPage) tea.Cmd {
 	return func() tea.Msg {
 		var results []applyResult
 		for _, pg := range pages {
+			for _, u := range pg.UserEntries {
+				err := apply.CreateUser(u.Name, u.Password)
+				results = append(results, applyResult{label: "Create user: " + u.Name, err: err})
+			}
 			for _, opt := range pg.Options {
 				if !opt.Checked || opt.ApplyFn == nil {
 					continue
@@ -380,7 +389,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyState = applyDone
 		m.applyResults = msg.results
 		return m, nil
-
 
 	case detectDoneMsg:
 		m.detecting = false
@@ -429,47 +437,93 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		// While a KindTextInput is open, forward all keys to the active component.
+		// While a text input is open, route to the right context.
+		// USR tab has its own multi-step flows; other tabs use the standard KindTextInput path.
 		// Only Enter and Esc are handled specially here.
 		if m.editingOption {
 			switch msg.String() {
 			case "enter":
-				absIdx := m.tabSubPage*maxOptionsPerPage + m.categoryPageCursor
-				opt := &m.categoryPages[m.activeTab].Options[absIdx]
-				if opt.PasswordConfirm {
-					val := m.textInput.Value()
-					m.inputError = ""
-					switch m.inputSubStep {
-					case 0: // username
-						if val == "" {
-							m.inputError = "username cannot be empty"
-							return m, nil
-						}
-						m.subValues[0] = val
-						m.inputSubStep = 1
-						m.textInput = newPasswordInput("Password:  ")
-					case 1: // password
-						if val == "" {
-							m.inputError = "password cannot be empty"
-							return m, nil
-						}
-						m.subValues[1] = val
-						m.inputSubStep = 2
-						m.textInput = newPasswordInput("Confirm:   ")
-					case 2: // confirm
-						if val != m.subValues[1] {
-							m.inputError = "passwords do not match"
+				val := m.textInput.Value()
+				m.inputError = ""
+				if m.activeTab == tabIndexUSR {
+					nUsers := len(m.categoryPages[tabIndexUSR].UserEntries)
+					if m.usrSubTab == nUsers {
+						// New User flow: step 0=username, 1=password, 2=confirm.
+						switch m.inputSubStep {
+						case 0:
+							if val == "" {
+								m.inputError = "username cannot be empty"
+								return m, nil
+							}
+							m.subValues[0] = val
 							m.inputSubStep = 1
 							m.textInput = newPasswordInput("Password:  ")
-							return m, nil
+						case 1:
+							if val == "" {
+								m.inputError = "password cannot be empty"
+								return m, nil
+							}
+							m.subValues[1] = val
+							m.inputSubStep = 2
+							m.textInput = newPasswordInput("Confirm:   ")
+						case 2:
+							if val != m.subValues[1] {
+								m.inputError = "passwords do not match"
+								m.inputSubStep = 1
+								m.textInput = newPasswordInput("Password:  ")
+								return m, nil
+							}
+							m.categoryPages[tabIndexUSR].UserEntries = append(
+								m.categoryPages[tabIndexUSR].UserEntries,
+								UserEntry{Name: m.subValues[0], Password: m.subValues[1]},
+							)
+							m.usrSubTab = len(m.categoryPages[tabIndexUSR].UserEntries) - 1
+							m.editingOption = false
+							m.inputSubStep = 0
+							m.subValues = [3]string{}
+							m.categoryPageCursor = 0
 						}
-						opt.Value = m.subValues[0] + "\n" + m.subValues[1]
-						opt.Checked = true
-						m.editingOption = false
-						m.inputSubStep = 0
-						m.subValues = [3]string{}
+					} else {
+						// Editing an existing user's field.
+						user := &m.categoryPages[tabIndexUSR].UserEntries[m.usrSubTab]
+						switch m.usrEditingField {
+						case usrOptUsername:
+							if val == "" {
+								m.inputError = "username cannot be empty"
+								return m, nil
+							}
+							user.Name = val
+							m.editingOption = false
+						case usrOptPassword:
+							switch m.inputSubStep {
+							case 0:
+								if val == "" {
+									m.inputError = "password cannot be empty"
+									return m, nil
+								}
+								m.subValues[0] = val
+								m.inputSubStep = 1
+								m.textInput = newPasswordInput("Confirm:   ")
+							case 1:
+								if val != m.subValues[0] {
+									m.inputError = "passwords do not match"
+									m.inputSubStep = 0
+									m.textInput = newPasswordInput("New password: ")
+									return m, nil
+								}
+								user.Password = m.subValues[0]
+								m.editingOption = false
+								m.inputSubStep = 0
+								m.subValues = [3]string{}
+							}
+						case usrOptSSHKey:
+							user.SSHKey = val
+							m.editingOption = false
+						}
 					}
 				} else {
+					absIdx := m.tabSubPage*maxOptionsPerPage + m.categoryPageCursor
+					opt := &m.categoryPages[m.activeTab].Options[absIdx]
 					opt.Value = m.textInput.Value()
 					opt.Checked = true
 					m.editingOption = false
@@ -500,18 +554,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "r":
 			if m.page == pageReview && !m.editingOption {
-				absIdx := m.tabSubPage*maxOptionsPerPage + m.categoryPageCursor
-				page := m.categoryPages[m.activeTab]
-				if absIdx < len(page.Options) {
-					opt := &m.categoryPages[m.activeTab].Options[absIdx]
-					opt.Value = ""
+				if m.activeTab == tabIndexUSR {
+					nUsers := len(m.categoryPages[tabIndexUSR].UserEntries)
+					if m.usrSubTab < nUsers {
+						user := &m.categoryPages[tabIndexUSR].UserEntries[m.usrSubTab]
+						switch m.categoryPageCursor {
+						case usrOptUsername:
+							user.Name = ""
+						case usrOptPassword:
+							user.Password = ""
+						case usrOptSudo:
+							user.Sudo = false
+						case usrOptSSHKey:
+							user.SSHKey = ""
+						}
+					}
+				} else {
+					absIdx := m.tabSubPage*maxOptionsPerPage + m.categoryPageCursor
+					page := m.categoryPages[m.activeTab]
+					if absIdx < len(page.Options) {
+						m.categoryPages[m.activeTab].Options[absIdx].Value = ""
+					}
 				}
 			}
 
 		case "R":
 			if m.page == pageReview && !m.editingOption {
-				for i := range m.categoryPages[m.activeTab].Options {
-					m.categoryPages[m.activeTab].Options[i].Value = ""
+				if m.activeTab == tabIndexUSR {
+					nUsers := len(m.categoryPages[tabIndexUSR].UserEntries)
+					if m.usrSubTab < nUsers {
+						u := &m.categoryPages[tabIndexUSR].UserEntries[m.usrSubTab]
+						u.Sudo = false
+						u.SSHKey = ""
+					}
+				} else {
+					for i := range m.categoryPages[m.activeTab].Options {
+						m.categoryPages[m.activeTab].Options[i].Value = ""
+					}
 				}
 			}
 
@@ -531,19 +610,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "left", "h":
-			if m.page == pageReview && m.activeTab > 0 {
-				m.activeTab--
-				m.tabSubPage = 0
-				m.categoryPageCursor = 0
-				m.categoryPages = syncOnTabEnter(m.activeTab, m.categoryPages)
+			if m.page == pageReview {
+				if m.activeTab == tabIndexUSR && m.osInfo.IsRoot && m.usrSubTab > 0 {
+					m.usrSubTab--
+					m.categoryPageCursor = 0
+				} else if m.activeTab > 0 {
+					m.activeTab--
+					m.tabSubPage = 0
+					m.categoryPageCursor = 0
+					m.categoryPages = syncOnTabEnter(m.activeTab, m.categoryPages)
+				}
 			}
 
 		case "right", "l":
-			if m.page == pageReview && m.activeTab < len(m.categoryPages)-1 {
-				m.activeTab++
-				m.tabSubPage = 0
-				m.categoryPageCursor = 0
-				m.categoryPages = syncOnTabEnter(m.activeTab, m.categoryPages)
+			if m.page == pageReview {
+				nUserTabs := len(m.categoryPages[tabIndexUSR].UserEntries) + 1
+				if m.activeTab == tabIndexUSR && m.osInfo.IsRoot && m.usrSubTab < nUserTabs-1 {
+					m.usrSubTab++
+					m.categoryPageCursor = 0
+				} else if m.activeTab < len(m.categoryPages)-1 {
+					m.activeTab++
+					m.tabSubPage = 0
+					m.categoryPageCursor = 0
+					m.categoryPages = syncOnTabEnter(m.activeTab, m.categoryPages)
+				}
 			}
 
 		case "up", "k":
@@ -561,10 +651,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.applyOrReviewCursor--
 				}
 			case pageReview:
-				if m.categoryPageCursor > 0 {
+				if m.activeTab == tabIndexUSR && m.osInfo.IsRoot {
+					if m.categoryPageCursor > 0 {
+						m.categoryPageCursor--
+					}
+				} else if m.categoryPageCursor > 0 {
 					m.categoryPageCursor--
 				} else if m.tabSubPage > 0 {
-					// Wrap back to the last option on the previous sub-page.
 					m.tabSubPage--
 					curPage := m.categoryPages[m.activeTab]
 					prevStart := m.tabSubPage * maxOptionsPerPage
@@ -588,19 +681,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.applyOrReviewCursor++
 				}
 			case pageReview:
-				curPage := m.categoryPages[m.activeTab]
-				nSub := subPageCount(len(curPage.Options))
-				isLastSub := m.tabSubPage == nSub-1
-				startIdx := m.tabSubPage * maxOptionsPerPage
-				endIdx := min(startIdx+maxOptionsPerPage, len(curPage.Options))
-				subPageLen := endIdx - startIdx
-				maxCursor := subPageLen - 1
-				if m.categoryPageCursor < maxCursor {
-					m.categoryPageCursor++
-				} else if !isLastSub {
-					// Auto-advance to the next sub-page.
-					m.tabSubPage++
-					m.categoryPageCursor = 0
+				if m.activeTab == tabIndexUSR && m.osInfo.IsRoot {
+					nUsers := len(m.categoryPages[tabIndexUSR].UserEntries)
+					maxCursor := usrOptCount - 1
+					if m.usrSubTab == nUsers {
+						maxCursor = 0 // New User tab has no options to navigate
+					}
+					if m.categoryPageCursor < maxCursor {
+						m.categoryPageCursor++
+					}
+				} else {
+					curPage := m.categoryPages[m.activeTab]
+					nSub := subPageCount(len(curPage.Options))
+					isLastSub := m.tabSubPage == nSub-1
+					startIdx := m.tabSubPage * maxOptionsPerPage
+					endIdx := min(startIdx+maxOptionsPerPage, len(curPage.Options))
+					subPageLen := endIdx - startIdx
+					maxCursor := subPageLen - 1
+					if m.categoryPageCursor < maxCursor {
+						m.categoryPageCursor++
+					} else if !isLastSub {
+						m.tabSubPage++
+						m.categoryPageCursor = 0
+					}
 				}
 			}
 
@@ -635,57 +738,100 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.page = pageReview
 				}
 			case pageReview:
-				curPage := m.categoryPages[m.activeTab]
-				startIdx := m.tabSubPage * maxOptionsPerPage
-				endIdx := min(startIdx+maxOptionsPerPage, len(curPage.Options))
-				subPageLen := endIdx - startIdx
-				if m.categoryPageCursor < subPageLen {
-					absIdx := startIdx + m.categoryPageCursor
-					opt := &m.categoryPages[m.activeTab].Options[absIdx]
-					switch opt.Kind {
-					case KindTextInput:
+				if m.activeTab == tabIndexUSR && m.osInfo.IsRoot {
+					nUsers := len(m.categoryPages[tabIndexUSR].UserEntries)
+					if m.usrSubTab == nUsers {
+						// New User tab — start add flow.
 						ti := textinput.New()
-						if opt.PasswordConfirm {
+						ti.Prompt = "Username:  "
+						ti.Focus()
+						m.textInput = ti
+						m.inputSubStep = 0
+						m.subValues = [3]string{}
+						m.inputError = ""
+						m.editingOption = true
+					} else {
+						// Existing user tab — act on current cursor row.
+						user := &m.categoryPages[tabIndexUSR].UserEntries[m.usrSubTab]
+						switch m.categoryPageCursor {
+						case usrOptUsername:
+							ti := textinput.New()
+							ti.Prompt = "Username:  "
+							ti.SetValue(user.Name)
+							ti.Focus()
+							m.textInput = ti
+							m.usrEditingField = usrOptUsername
+							m.inputError = ""
+							m.editingOption = true
+						case usrOptPassword:
+							m.textInput = newPasswordInput("New password: ")
+							m.usrEditingField = usrOptPassword
 							m.inputSubStep = 0
 							m.subValues = [3]string{}
 							m.inputError = ""
-							ti.Prompt = "Username:  "
-							if opt.Value != "" {
-								ti.SetValue(strings.SplitN(opt.Value, "\n", 2)[0])
+							m.editingOption = true
+						case usrOptSudo:
+							user.Sudo = !user.Sudo
+						case usrOptSSHKey:
+							ti := textinput.New()
+							ti.Prompt = "SSH key:   "
+							ti.SetValue(user.SSHKey)
+							ti.Focus()
+							m.textInput = ti
+							m.usrEditingField = usrOptSSHKey
+							m.inputError = ""
+							m.editingOption = true
+						case usrOptDelete:
+							m.categoryPages[tabIndexUSR].UserEntries = append(
+								m.categoryPages[tabIndexUSR].UserEntries[:m.usrSubTab],
+								m.categoryPages[tabIndexUSR].UserEntries[m.usrSubTab+1:]...,
+							)
+							if m.usrSubTab >= len(m.categoryPages[tabIndexUSR].UserEntries) && m.usrSubTab > 0 {
+								m.usrSubTab--
 							}
-						} else {
+							m.categoryPageCursor = 0
+						}
+					}
+				} else {
+					curPage := m.categoryPages[m.activeTab]
+					startIdx := m.tabSubPage * maxOptionsPerPage
+					endIdx := min(startIdx+maxOptionsPerPage, len(curPage.Options))
+					subPageLen := endIdx - startIdx
+					if m.categoryPageCursor < subPageLen {
+						absIdx := startIdx + m.categoryPageCursor
+						opt := &m.categoryPages[m.activeTab].Options[absIdx]
+						switch opt.Kind {
+						case KindTextInput:
+							ti := textinput.New()
 							ti.Placeholder = opt.Default
 							editVal := opt.Value
 							if editVal == "" {
 								editVal = opt.Default
 							}
 							ti.SetValue(editVal)
-						}
-						ti.Focus()
-						m.textInput = ti
-						m.editingOption = true
-					case KindSelect:
-						m.selectItems = opt.SelectItems
-						// Start cursor on the current value (or default).
-						current := opt.Value
-						if current == "" {
-							current = opt.Default
-						}
-						m.selectCursor = 0
-						for i, item := range m.selectItems {
-							if item == current {
-								m.selectCursor = i
-								break
+							ti.Focus()
+							m.textInput = ti
+							m.editingOption = true
+						case KindSelect:
+							m.selectItems = opt.SelectItems
+							current := opt.Value
+							if current == "" {
+								current = opt.Default
 							}
+							m.selectCursor = 0
+							for i, item := range m.selectItems {
+								if item == current {
+									m.selectCursor = i
+									break
+								}
+							}
+							const visibleItems = 5
+							m.selectViewport = max(0, m.selectCursor-visibleItems/2)
+							m.selectingOption = true
+						default: // KindToggle
+							opt.Checked = !opt.Checked
 						}
-						const visibleItems = 5
-						m.selectViewport = max(0, m.selectCursor-visibleItems/2)
-						m.selectingOption = true
-					default: // KindToggle
-						opt.Checked = !opt.Checked
-					}
-				} else {
-					if m.activeTab == tabIndexGO {
+					} else if m.activeTab == tabIndexGO {
 						switch m.applyState {
 						case applyIdle:
 							m.applyState = applyRunning
@@ -823,10 +969,14 @@ func (m Model) View() string {
 		hints := m.viewHints(bottomContentW)
 		innerW := bottomContentW + 3
 		sepLine := lipgloss.NewStyle().Foreground(Themes[m.themeIdx].Accent).Render(strings.Repeat("─", innerW))
+		bodyPrefix := "\n"
+		if m.activeTab == tabIndexUSR {
+			bodyPrefix = ""
+		}
 		bodyBlock := lipgloss.NewStyle().
 			Width(bottomContentW).
 			PaddingLeft(2).PaddingRight(1).
-			Render("\n" + body)
+			Render(bodyPrefix + body)
 		hintsBlock := lipgloss.NewStyle().
 			Width(bottomContentW).
 			PaddingLeft(2).PaddingRight(1).
@@ -971,7 +1121,6 @@ func (m Model) viewHints(maxWidth int) string {
 
 	if m.helpExpanded {
 		if m.page == pageReview {
-			// Three columns: navigation | actions | meta — max 2 rows total.
 			groups := [][]key.Binding{
 				{keyNav, keyTabNav},
 				{keySelect, keyBack, keyResetOption, keyResetTab},
@@ -1187,6 +1336,99 @@ func (m Model) viewCategoryReviewAboveSep() string {
 	return b.String()
 }
 
+// viewUSRBody renders the USR tab body: secondary user sub-tab row + per-user options.
+func (m Model) viewUSRBody(maxWidth int) string {
+	var b strings.Builder
+	errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444"))
+	users := m.categoryPages[tabIndexUSR].UserEntries
+
+	if !m.osInfo.IsRoot {
+		b.WriteString(mutedStyle.Render("User management requires root.") + "\n")
+		b.WriteString(normalStyle.Render("  sudo ./boltx") + "\n")
+		return b.String()
+	}
+
+	// Secondary user sub-tab row.
+	usrTabActiveStyle := lipgloss.NewStyle().Foreground(Themes[m.themeIdx].Accent).Bold(true)
+	tabParts := make([]string, len(users)+1)
+	for i, u := range users {
+		if i == m.usrSubTab {
+			tabParts[i] = usrTabActiveStyle.Render(u.Name)
+		} else {
+			tabParts[i] = mutedStyle.Render(u.Name)
+		}
+	}
+	newUserIdx := len(users)
+	if m.usrSubTab == newUserIdx {
+		tabParts[newUserIdx] = usrTabActiveStyle.Render("+ New User")
+	} else {
+		tabParts[newUserIdx] = mutedStyle.Render("+ New User")
+	}
+	b.WriteString(strings.Join(tabParts, "   ") + "\n\n")
+
+	// New User tab.
+	if m.usrSubTab == newUserIdx {
+		if m.editingOption {
+			b.WriteString(m.textInput.View() + "\n")
+			if m.inputError != "" {
+				b.WriteString(errorStyle.Render("✗ "+m.inputError) + "\n")
+			}
+		} else {
+			b.WriteString(mutedStyle.Render("Press enter to add a new user.") + "\n")
+		}
+		return b.String()
+	}
+
+	// Existing user options.
+	user := users[m.usrSubTab]
+	type usrRow struct {
+		label string
+		value string
+		idx   int
+	}
+	sudoVal := "○"
+	if user.Sudo {
+		sudoVal = "●"
+	}
+	sshVal := user.SSHKey
+	if sshVal == "" {
+		sshVal = "(none)"
+	}
+	rows := []usrRow{
+		{label: "Username", value: user.Name, idx: usrOptUsername},
+		{label: "Password", value: "••••••", idx: usrOptPassword},
+		{label: "Sudo", value: sudoVal, idx: usrOptSudo},
+		{label: "SSH key", value: sshVal, idx: usrOptSSHKey},
+	}
+	for _, row := range rows {
+		isCursor := m.categoryPageCursor == row.idx
+		cur := noCursorStr
+		style := normalStyle
+		if isCursor {
+			cur = cursorStr
+			style = selectedStyle
+		}
+		b.WriteString(cur + style.Render(row.label+":") + "  " + mutedStyle.Render(row.value) + "\n")
+		if isCursor && m.editingOption {
+			b.WriteString("  " + m.textInput.View() + "\n")
+			if m.inputError != "" {
+				b.WriteString("  " + errorStyle.Render("✗ "+m.inputError) + "\n")
+			}
+		}
+	}
+
+	// Delete user row — danger color, always last.
+	deleteStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444"))
+	isCursorDel := m.categoryPageCursor == usrOptDelete
+	curDel := noCursorStr
+	if isCursorDel {
+		curDel = cursorStr
+	}
+	b.WriteString("\n" + curDel + deleteStyle.Render("Delete user") + "\n")
+
+	return b.String()
+}
+
 // viewCategoryReviewBody returns the options list and optional confirm button
 // that sit below the full-width separator. maxWidth is the available text
 // width for word-wrap; callers should pass bottomContentW when the body
@@ -1194,6 +1436,9 @@ func (m Model) viewCategoryReviewAboveSep() string {
 func (m Model) viewCategoryReviewBody(maxWidth int) string {
 	if m.activeTab == tabIndexGO {
 		return m.viewGOBody(maxWidth)
+	}
+	if m.activeTab == tabIndexUSR {
+		return m.viewUSRBody(maxWidth)
 	}
 
 	var b strings.Builder
@@ -1420,7 +1665,7 @@ func (m Model) viewCategoryReview() string {
 // checkedCount returns the number of checked options with a non-nil ApplyFn
 // in the given page — i.e. changes that will be applied on GO!.
 func checkedCount(page CategoryPage) int {
-	n := 0
+	n := len(page.UserEntries)
 	for _, opt := range page.Options {
 		if opt.Checked && opt.ApplyFn != nil {
 			n++
