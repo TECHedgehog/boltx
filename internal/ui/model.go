@@ -455,6 +455,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 								m.inputError = "username cannot be empty"
 								return m, nil
 							}
+							for _, u := range m.categoryPages[tabIndexUSR].UserEntries {
+								if u.Name == val {
+									m.inputError = "user \"" + val + "\" already in list"
+									return m, nil
+								}
+							}
+							if apply.UserExists(val) {
+								m.inputError = "user \"" + val + "\" already exists on system"
+								return m, nil
+							}
 							m.subValues[0] = val
 							m.inputSubStep = 1
 							m.textInput = newPasswordInput("Password:  ")
@@ -490,6 +500,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						case usrOptUsername:
 							if val == "" {
 								m.inputError = "username cannot be empty"
+								return m, nil
+							}
+							for i, u := range m.categoryPages[tabIndexUSR].UserEntries {
+								if u.Name == val && i != m.usrSubTab {
+									m.inputError = "user \"" + val + "\" already in list"
+									return m, nil
+								}
+							}
+							if apply.UserExists(val) {
+								m.inputError = "user \"" + val + "\" already exists on system"
 								return m, nil
 							}
 							user.Name = val

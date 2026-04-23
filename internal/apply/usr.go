@@ -3,6 +3,7 @@ package apply
 import (
 	"fmt"
 	"os/exec"
+	"os/user"
 	"regexp"
 	"strings"
 )
@@ -17,6 +18,12 @@ func validateUsername(name string) error {
 		return fmt.Errorf("invalid username %q (must start with a-z or _, contain only a-z, 0-9, _, -; max 32 chars)", name)
 	}
 	return nil
+}
+
+// UserExists reports whether a user with the given name already exists on the system.
+func UserExists(name string) bool {
+	_, err := user.Lookup(name)
+	return err == nil
 }
 
 // CreateUser creates a new Linux user with a home directory and sets its password.
