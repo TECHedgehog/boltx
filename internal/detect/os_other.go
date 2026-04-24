@@ -15,6 +15,26 @@ func DetectOS() OSInfo {
 	return info
 }
 
+// DetectTimezones returns a minimal hardcoded list on unsupported platforms.
+func DetectTimezones() []string {
+	return []string{
+		"Africa/Cairo",
+		"America/Chicago",
+		"America/Los_Angeles",
+		"America/New_York",
+		"America/Sao_Paulo",
+		"Asia/Kolkata",
+		"Asia/Shanghai",
+		"Asia/Tokyo",
+		"Australia/Sydney",
+		"Europe/Berlin",
+		"Europe/London",
+		"Europe/Madrid",
+		"Europe/Paris",
+		"UTC",
+	}
+}
+
 // DetectLocales returns a minimal hardcoded list on unsupported platforms.
 func DetectLocales() []string {
 	return []string{

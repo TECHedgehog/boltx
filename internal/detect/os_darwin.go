@@ -4,6 +4,8 @@ package detect
 
 import (
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -78,6 +80,45 @@ func plistValue(content, key string) string {
 		return ""
 	}
 	return rest[start+len("<string>") : end]
+}
+
+// DetectTimezones returns a sorted list of available timezones by walking /usr/share/zoneinfo.
+// Falls back to a minimal hardcoded list if the directory is unreadable.
+func DetectTimezones() []string {
+	const root = "/usr/share/zoneinfo"
+	var zones []string
+	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		rel := strings.TrimPrefix(path, root+"/")
+		// Skip metadata files (e.g. leap-seconds.list, +VERSION, posix/, right/)
+		if strings.HasPrefix(rel, "+") || strings.HasPrefix(rel, "posix/") || strings.HasPrefix(rel, "right/") || !strings.Contains(rel, "/") {
+			return nil
+		}
+		zones = append(zones, rel)
+		return nil
+	})
+	if len(zones) > 0 {
+		sort.Strings(zones)
+		return zones
+	}
+	return []string{
+		"Africa/Cairo",
+		"America/Chicago",
+		"America/Los_Angeles",
+		"America/New_York",
+		"America/Sao_Paulo",
+		"Asia/Kolkata",
+		"Asia/Shanghai",
+		"Asia/Tokyo",
+		"Australia/Sydney",
+		"Europe/Berlin",
+		"Europe/London",
+		"Europe/Madrid",
+		"Europe/Paris",
+		"UTC",
+	}
 }
 
 // detectMacOSPkg checks for Homebrew or MacPorts at their standard install paths.
