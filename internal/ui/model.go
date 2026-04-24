@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"boltx/internal/apply"
 	"boltx/internal/detect"
@@ -61,10 +62,16 @@ const (
 
 // UserEntry holds per-user configuration for the USR tab.
 type UserEntry struct {
-	Name     string
-	Password string
-	Sudo     bool
-	SSHKey   string
+	Name          string
+	OriginalName  string // system name at load time; empty for new users
+	Password      string // used for new user creation only
+	NewPassword   string // used for existing user password change (deferred)
+	Sudo          bool
+	OriginalSudo  bool // sudo state at load time, for delta apply
+	SSHKey        string
+	Existing      bool // loaded from the system, not pending creation
+	ActiveSession bool // user has running processes; username cannot be changed
+	PendingDelete bool // existing user marked for deletion at apply time
 }
 
 // Per-user option cursor positions within the USR tab body.
@@ -259,6 +266,7 @@ type Model struct {
 
 	// USR tab state — user sub-tabs and per-user editing.
 	usrSubTab       int // index into UserEntries; len(UserEntries) = "+ New User" tab
+	usrTabOffset    int // first visible entry index in the sub-tab bar
 	usrEditingField int // which per-user field is being edited (usrOpt* constants)
 
 	// Option selecting — active while a KindSelect picker is open.
@@ -273,6 +281,9 @@ type Model struct {
 
 	// Theme cycling — index into Themes slice, advanced by 't'.
 	themeIdx int
+
+	ringBell   bool // cleared after one render cycle
+	visualBell bool // flashes blocked row for 150ms
 
 	// Layout — recomputed on every terminal resize and after detection completes.
 	rightContentW int // measured width of the rendered info table (set after detection)
@@ -351,8 +362,42 @@ func doApplyAll(pages []CategoryPage) tea.Cmd {
 		var results []applyResult
 		for _, pg := range pages {
 			for _, u := range pg.UserEntries {
-				err := apply.CreateUser(u.Name, u.Password)
-				results = append(results, applyResult{label: "Create user: " + u.Name, err: err})
+				if u.Existing && u.PendingDelete {
+					err := apply.DeleteUser(u.Name)
+					results = append(results, applyResult{label: "Delete user: " + u.Name, err: err})
+					continue
+				}
+				if !u.Existing {
+					err := apply.CreateUser(u.Name, u.Password)
+					results = append(results, applyResult{label: "Create user: " + u.Name, err: err})
+					if err != nil {
+						continue
+					}
+					if u.Sudo {
+						err = apply.AddSudo(u.Name)
+						results = append(results, applyResult{label: "Add sudo: " + u.Name, err: err})
+					}
+				} else {
+					// Existing user: rename first, then password/sudo delta.
+					if u.OriginalName != "" && u.Name != u.OriginalName {
+						err := apply.RenameUser(u.OriginalName, u.Name)
+						results = append(results, applyResult{label: "Rename user: " + u.OriginalName + "→" + u.Name, err: err})
+						if err != nil {
+							continue
+						}
+					}
+					if u.NewPassword != "" {
+						err := apply.ChangePassword(u.Name, u.NewPassword)
+						results = append(results, applyResult{label: "Change password: " + u.Name, err: err})
+					}
+					if u.Sudo && !u.OriginalSudo {
+						err := apply.AddSudo(u.Name)
+						results = append(results, applyResult{label: "Add sudo: " + u.Name, err: err})
+					} else if !u.Sudo && u.OriginalSudo {
+						err := apply.RemoveSudo(u.Name)
+						results = append(results, applyResult{label: "Remove sudo: " + u.Name, err: err})
+					}
+				}
 			}
 			for _, opt := range pg.Options {
 				if !opt.Checked || opt.ApplyFn == nil {
@@ -384,6 +429,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.spinner, cmd = m.spinner.Update(msg)
 			return m, cmd
 		}
+
+	case bellClearedMsg:
+		m.ringBell = false
+		m.visualBell = false
+		return m, nil
 
 	case applyDoneMsg:
 		m.applyState = applyDone
@@ -455,6 +505,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 								m.inputError = "username cannot be empty"
 								return m, nil
 							}
+							if err := apply.ValidateUsername(val); err != nil {
+								m.inputError = err.Error()
+								return m, nil
+							}
 							for _, u := range m.categoryPages[tabIndexUSR].UserEntries {
 								if u.Name == val {
 									m.inputError = "user \"" + val + "\" already in list"
@@ -502,6 +556,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 								m.inputError = "username cannot be empty"
 								return m, nil
 							}
+							if err := apply.ValidateUsername(val); err != nil {
+								m.inputError = err.Error()
+								return m, nil
+							}
 							for i, u := range m.categoryPages[tabIndexUSR].UserEntries {
 								if u.Name == val && i != m.usrSubTab {
 									m.inputError = "user \"" + val + "\" already in list"
@@ -531,7 +589,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 									m.textInput = newPasswordInput("New password: ")
 									return m, nil
 								}
-								user.Password = m.subValues[0]
+								if user.Existing {
+									user.NewPassword = m.subValues[0]
+								} else {
+									user.Password = m.subValues[0]
+								}
 								m.editingOption = false
 								m.inputSubStep = 0
 								m.subValues = [3]string{}
@@ -634,6 +696,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.activeTab == tabIndexUSR && m.osInfo.IsRoot && m.usrSubTab > 0 {
 					m.usrSubTab--
 					m.categoryPageCursor = 0
+					labels := usrTabLabels(m.categoryPages[tabIndexUSR].UserEntries)
+					m.usrTabOffset = clampUsrTabOffset(labels, m.usrSubTab, m.usrTabOffset, m.leftColW+m.rightContentW+2)
 				} else if m.activeTab > 0 {
 					m.activeTab--
 					m.tabSubPage = 0
@@ -648,6 +712,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.activeTab == tabIndexUSR && m.osInfo.IsRoot && m.usrSubTab < nUserTabs-1 {
 					m.usrSubTab++
 					m.categoryPageCursor = 0
+					labels := usrTabLabels(m.categoryPages[tabIndexUSR].UserEntries)
+					m.usrTabOffset = clampUsrTabOffset(labels, m.usrSubTab, m.usrTabOffset, m.leftColW+m.rightContentW+2)
 				} else if m.activeTab < len(m.categoryPages)-1 {
 					m.activeTab++
 					m.tabSubPage = 0
@@ -775,6 +841,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						user := &m.categoryPages[tabIndexUSR].UserEntries[m.usrSubTab]
 						switch m.categoryPageCursor {
 						case usrOptUsername:
+							if user.ActiveSession {
+								m.ringBell = true
+								m.visualBell = true
+								return m, bellCmd()
+							}
 							ti := textinput.New()
 							ti.Prompt = "Username:  "
 							ti.SetValue(user.Name)
@@ -802,14 +873,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.inputError = ""
 							m.editingOption = true
 						case usrOptDelete:
-							m.categoryPages[tabIndexUSR].UserEntries = append(
-								m.categoryPages[tabIndexUSR].UserEntries[:m.usrSubTab],
-								m.categoryPages[tabIndexUSR].UserEntries[m.usrSubTab+1:]...,
-							)
-							if m.usrSubTab >= len(m.categoryPages[tabIndexUSR].UserEntries) && m.usrSubTab > 0 {
-								m.usrSubTab--
+							u := &m.categoryPages[tabIndexUSR].UserEntries[m.usrSubTab]
+							if u.Existing {
+								u.PendingDelete = !u.PendingDelete
+							} else {
+								m.categoryPages[tabIndexUSR].UserEntries = append(
+									m.categoryPages[tabIndexUSR].UserEntries[:m.usrSubTab],
+									m.categoryPages[tabIndexUSR].UserEntries[m.usrSubTab+1:]...,
+								)
+								if m.usrSubTab >= len(m.categoryPages[tabIndexUSR].UserEntries) && m.usrSubTab > 0 {
+									m.usrSubTab--
+								}
+								m.categoryPageCursor = 0
 							}
-							m.categoryPageCursor = 0
 						}
 					}
 				} else {
@@ -1102,11 +1178,15 @@ func (m Model) View() string {
 		box = strings.Join(boxLines, "\n")
 	}
 
+	bell := ""
+	if m.ringBell {
+		bell = "\a"
+	}
 	if m.width > 0 && m.height > 0 {
-		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Top,
+		return bell + lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Top,
 			strings.Repeat("\n", m.stableTop)+box)
 	}
-	return box
+	return bell + box
 }
 
 // viewTitle returns the "boltx" title with a privilege indicator suffix.
@@ -1368,23 +1448,12 @@ func (m Model) viewUSRBody(maxWidth int) string {
 		return b.String()
 	}
 
-	// Secondary user sub-tab row.
+	// Secondary user sub-tab row — sliding window, always one line.
 	usrTabActiveStyle := lipgloss.NewStyle().Foreground(Themes[m.themeIdx].Accent).Bold(true)
-	tabParts := make([]string, len(users)+1)
-	for i, u := range users {
-		if i == m.usrSubTab {
-			tabParts[i] = usrTabActiveStyle.Render(u.Name)
-		} else {
-			tabParts[i] = mutedStyle.Render(u.Name)
-		}
-	}
 	newUserIdx := len(users)
-	if m.usrSubTab == newUserIdx {
-		tabParts[newUserIdx] = usrTabActiveStyle.Render("+ New User")
-	} else {
-		tabParts[newUserIdx] = mutedStyle.Render("+ New User")
-	}
-	b.WriteString(strings.Join(tabParts, "   ") + "\n\n")
+	allLabels := usrTabLabels(users)
+
+	b.WriteString(usrTabSlidingWindow(allLabels, m.usrSubTab, m.usrTabOffset, maxWidth, usrTabActiveStyle) + "\n\n")
 
 	// New User tab.
 	if m.usrSubTab == newUserIdx {
@@ -1406,18 +1475,25 @@ func (m Model) viewUSRBody(maxWidth int) string {
 		value string
 		idx   int
 	}
-	sudoVal := "○"
-	if user.Sudo {
-		sudoVal = "●"
-	}
 	sshVal := user.SSHKey
 	if sshVal == "" {
 		sshVal = "(none)"
 	}
+	pwVal := "••••••"
+	if user.Existing {
+		pwVal = "(unchanged)"
+		if user.NewPassword != "" {
+			pwVal = "(set)"
+		}
+	}
+	usernameVal := user.Name
+	if user.ActiveSession {
+		usernameVal = user.Name + " (active — log out to rename)"
+	}
 	rows := []usrRow{
-		{label: "Username", value: user.Name, idx: usrOptUsername},
-		{label: "Password", value: "••••••", idx: usrOptPassword},
-		{label: "Sudo", value: sudoVal, idx: usrOptSudo},
+		{label: "Username", value: usernameVal, idx: usrOptUsername},
+		{label: "Password", value: pwVal, idx: usrOptPassword},
+		{label: "Sudo", idx: usrOptSudo},
 		{label: "SSH key", value: sshVal, idx: usrOptSSHKey},
 	}
 	for _, row := range rows {
@@ -1428,11 +1504,24 @@ func (m Model) viewUSRBody(maxWidth int) string {
 			cur = cursorStr
 			style = selectedStyle
 		}
-		b.WriteString(cur + style.Render(row.label+":") + "  " + mutedStyle.Render(row.value) + "\n")
-		if isCursor && m.editingOption {
-			b.WriteString("  " + m.textInput.View() + "\n")
-			if m.inputError != "" {
-				b.WriteString("  " + errorStyle.Render("✗ "+m.inputError) + "\n")
+		if row.idx == usrOptUsername && m.visualBell {
+			style = errorStyle
+		}
+		if row.idx == usrOptSudo {
+			marker := radioOff
+			if user.Sudo {
+				marker = radioOn
+			}
+			b.WriteString(renderOptionLine(cur, marker, "Sudo", style, maxWidth) + "\n")
+		} else {
+			b.WriteString(renderOptionLine(cur, kindTextInputMarker, row.label+": ", style, maxWidth))
+			b.WriteString(mutedStyle.Render(row.value) + "\n")
+if isCursor && m.editingOption {
+				indent := strings.Repeat(" ", lipgloss.Width(cur+kindTextInputMarker))
+				b.WriteString(indent + m.textInput.View() + "\n")
+				if m.inputError != "" {
+					b.WriteString(indent + errorStyle.Render("✗ "+m.inputError) + "\n")
+				}
 			}
 		}
 	}
@@ -1444,9 +1533,91 @@ func (m Model) viewUSRBody(maxWidth int) string {
 	if isCursorDel {
 		curDel = cursorStr
 	}
-	b.WriteString("\n" + curDel + deleteStyle.Render("Delete user") + "\n")
+	deleteLabel := "Delete user"
+	if user.PendingDelete {
+		deleteLabel = "Undo delete"
+	}
+	b.WriteString("\n" + curDel + deleteStyle.Render(deleteLabel) + "\n")
 
 	return b.String()
+}
+
+// usrTabLabels builds the display labels for all user sub-tabs including "+ New User".
+func usrTabLabels(entries []UserEntry) []string {
+	labels := make([]string, len(entries)+1)
+	for i, u := range entries {
+		label := u.Name
+		if u.PendingDelete {
+			label = "✗" + u.Name
+		} else if u.Existing {
+			label = "·" + u.Name
+		}
+		labels[i] = label
+	}
+	labels[len(entries)] = "+ New User"
+	return labels
+}
+
+// usrTabVisibleEnd returns the exclusive end index of entries visible from offset within maxWidth.
+func usrTabVisibleEnd(labels []string, offset, maxWidth int) int {
+	const sepW = 3
+	budget := maxWidth
+	if offset > 0 {
+		budget -= 1 + sepW // "‹" + sep
+	}
+	hi := offset
+	for hi < len(labels) {
+		w := len([]rune(labels[hi]))
+		if hi > offset {
+			w += sepW
+		}
+		// If more entries remain after this one, reserve space for "›".
+		if hi+1 < len(labels) && budget-w < 1+sepW {
+			break
+		}
+		budget -= w
+		hi++
+	}
+	return hi
+}
+
+// clampUsrTabOffset returns the smallest offset ≥ current that keeps activeIdx visible.
+func clampUsrTabOffset(labels []string, activeIdx, offset, maxWidth int) int {
+	if activeIdx < offset {
+		return activeIdx
+	}
+	for {
+		if activeIdx < usrTabVisibleEnd(labels, offset, maxWidth) {
+			return offset
+		}
+		offset++
+		if offset > activeIdx {
+			return activeIdx
+		}
+	}
+}
+
+// usrTabSlidingWindow renders the user sub-tab row as a single line starting at offset.
+// Only scrolls when activeIdx goes off-screen (lazy scroll).
+func usrTabSlidingWindow(labels []string, activeIdx, offset, maxWidth int, activeStyle lipgloss.Style) string {
+	const sep = "   "
+	hi := usrTabVisibleEnd(labels, offset, maxWidth)
+
+	var parts []string
+	if offset > 0 {
+		parts = append(parts, mutedStyle.Render("‹"))
+	}
+	for i := offset; i < hi; i++ {
+		if i == activeIdx {
+			parts = append(parts, activeStyle.Render(labels[i]))
+		} else {
+			parts = append(parts, mutedStyle.Render(labels[i]))
+		}
+	}
+	if hi < len(labels) {
+		parts = append(parts, mutedStyle.Render("›"))
+	}
+	return strings.Join(parts, sep)
 }
 
 // viewCategoryReviewBody returns the options list and optional confirm button
@@ -1717,10 +1888,31 @@ func (m Model) viewTabBar() string {
 // It dispatches to tab-specific sync functions as they are implemented.
 func syncOnTabEnter(tabIdx int, pages []CategoryPage) []CategoryPage {
 	switch tabIdx {
+	case tabIndexUSR:
+		return syncUsrTab(pages)
 	case tabIndexPKG:
 		return syncPkgTab(pages)
 	case tabIndexRUN:
 		return syncRunTab(pages)
+	}
+	return pages
+}
+
+// syncUsrTab merges system human users (UID ≥ 1000) into UserEntries.
+// Existing entries (pending new users or already-merged system users) are kept as-is.
+func syncUsrTab(pages []CategoryPage) []CategoryPage {
+	existing := map[string]bool{}
+	for _, u := range pages[tabIndexUSR].UserEntries {
+		existing[u.Name] = true
+	}
+	for _, hu := range apply.LoadHumanUsers() {
+		if existing[hu.Name] {
+			continue
+		}
+		pages[tabIndexUSR].UserEntries = append(
+			pages[tabIndexUSR].UserEntries,
+			UserEntry{Name: hu.Name, OriginalName: hu.Name, Sudo: hu.Sudo, OriginalSudo: hu.Sudo, Existing: true, ActiveSession: apply.HasActiveProcesses(hu.Name)},
+		)
 	}
 	return pages
 }
@@ -1817,4 +2009,10 @@ func renderOptionLine(cursor, radio, label string, style lipgloss.Style, maxWidt
 		sb.WriteString(style.Render(line))
 	}
 	return sb.String()
+}
+
+type bellClearedMsg struct{}
+
+func bellCmd() tea.Cmd {
+	return tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg { return bellClearedMsg{} })
 }
