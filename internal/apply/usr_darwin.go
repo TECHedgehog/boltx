@@ -172,30 +172,31 @@ func DeleteUser(name string) error {
 	return nil
 }
 
-// AddSudo adds an existing user to the admin group via dseditgroup.
+// AddSudo adds an existing user to the admin group via dscl.
+// Uses dscl directly — dseditgroup requires admin credentials even as root on modern macOS.
 // Requires root privileges.
 func AddSudo(name string) error {
 	group, err := sudoGroup()
 	if err != nil {
 		return err
 	}
-	out, err := exec.Command("dseditgroup", "-o", "edit", "-n", "/Local/Default", "-a", name, "-t", "user", group).CombinedOutput()
+	out, err := exec.Command("dscl", ".", "-append", "/Groups/"+group, "GroupMembership", name).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("dseditgroup add %s to %s: %w\n%s", name, group, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("dscl -append /Groups/%s GroupMembership %s: %w\n%s", group, name, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
-// RemoveSudo removes a user from the admin group via dseditgroup.
+// RemoveSudo removes a user from the admin group via dscl.
 // Requires root privileges.
 func RemoveSudo(name string) error {
 	group, err := sudoGroup()
 	if err != nil {
 		return err
 	}
-	out, err := exec.Command("dseditgroup", "-o", "edit", "-n", "/Local/Default", "-d", name, "-t", "user", group).CombinedOutput()
+	out, err := exec.Command("dscl", ".", "-delete", "/Groups/"+group, "GroupMembership", name).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("dseditgroup remove %s from %s: %w\n%s", name, group, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("dscl -delete /Groups/%s GroupMembership %s: %w\n%s", group, name, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
