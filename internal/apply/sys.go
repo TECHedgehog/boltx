@@ -81,6 +81,9 @@ func Locale(locale string) error {
 		return nil
 	}
 
+	if err := os.MkdirAll("/etc/default", 0755); err != nil {
+		return fmt.Errorf("mkdir /etc/default: %w", err)
+	}
 	content := "LANG=" + locale + "\n"
 	if err := os.WriteFile("/etc/default/locale", []byte(content), 0644); err != nil {
 		return fmt.Errorf("write /etc/default/locale: %w", err)

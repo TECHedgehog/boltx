@@ -104,9 +104,9 @@ func CreateUser(name, password string) error {
 		}
 	}
 
-	// Set password last — dscl -passwd takes plaintext.
-	if out, err := exec.Command("dscl", ".", "-passwd", "/Users/"+name, password).CombinedOutput(); err != nil {
-		return fmt.Errorf("dscl -passwd %s: %w\n%s", name, err, strings.TrimSpace(string(out)))
+	// Set password via sysadminctl — works as root without requiring the old password.
+	if out, err := exec.Command("sysadminctl", "-resetPasswordFor", name, "-newPassword", password).CombinedOutput(); err != nil {
+		return fmt.Errorf("sysadminctl -resetPasswordFor %s: %w\n%s", name, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -120,9 +120,9 @@ func ChangePassword(name, password string) error {
 	if password == "" {
 		return fmt.Errorf("password cannot be empty")
 	}
-	out, err := exec.Command("dscl", ".", "-passwd", "/Users/"+name, password).CombinedOutput()
+	out, err := exec.Command("sysadminctl", "-resetPasswordFor", name, "-newPassword", password).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("dscl -passwd %s: %w\n%s", name, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("sysadminctl -resetPasswordFor %s: %w\n%s", name, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }

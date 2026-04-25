@@ -483,6 +483,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selectingOption = false
 			case "esc", "q":
 				m.selectingOption = false
+			default:
+				// Letter key: jump to first item whose prefix matches (e.g. "e" → Europe/...).
+				if k := msg.String(); len(k) == 1 {
+					kl := strings.ToLower(k)
+					for i, item := range m.selectItems {
+						if strings.HasPrefix(strings.ToLower(item), kl) {
+							m.selectCursor = i
+							const visibleItems = 5
+							m.selectViewport = max(0, m.selectCursor-visibleItems/2)
+							break
+						}
+					}
+				}
 			}
 			return m, nil
 		}

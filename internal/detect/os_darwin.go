@@ -21,6 +21,12 @@ func DetectOS() OSInfo {
 	}
 	info.IsRoot = os.Getuid() == 0
 	info.Locale = os.Getenv("LANG")
+	// /etc/localtime → e.g. /private/var/db/timezone/zoneinfo/Europe/Madrid
+	if t, err := os.Readlink("/etc/localtime"); err == nil {
+		if idx := strings.Index(t, "zoneinfo/"); idx >= 0 {
+			info.Timezone = t[idx+len("zoneinfo/"):]
+		}
+	}
 	return info
 }
 
