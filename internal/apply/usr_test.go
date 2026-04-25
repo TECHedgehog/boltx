@@ -18,7 +18,7 @@ func TestValidateUsername_Valid(t *testing.T) {
 		strings.Repeat("a", 32), // max length
 	}
 	for _, name := range cases {
-		if err := validateUsername(name); err != nil {
+		if err := ValidateUsername(name); err != nil {
 			t.Errorf("validateUsername(%q) unexpected error: %v", name, err)
 		}
 	}
@@ -38,7 +38,7 @@ func TestValidateUsername_Invalid(t *testing.T) {
 		{strings.Repeat("a", 33), "too long"}, // 33 chars
 	}
 	for _, tc := range cases {
-		err := validateUsername(tc.name)
+		err := ValidateUsername(tc.name)
 		if err == nil {
 			t.Errorf("validateUsername(%q) expected error, got nil", tc.name)
 			continue

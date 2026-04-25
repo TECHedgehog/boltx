@@ -86,12 +86,18 @@ func plistValue(content, key string) string {
 // Falls back to a minimal hardcoded list if the directory is unreadable.
 func DetectTimezones() []string {
 	const root = "/usr/share/zoneinfo"
+	// Resolve symlink — on macOS, /usr/share/zoneinfo → /private/var/db/timezone/zoneinfo
+	// filepath.Walk returns real paths, so TrimPrefix must use the resolved root.
+	realRoot := root
+	if r, err := filepath.EvalSymlinks(root); err == nil {
+		realRoot = r
+	}
 	var zones []string
-	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	_ = filepath.Walk(realRoot, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}
-		rel := strings.TrimPrefix(path, root+"/")
+		rel := strings.TrimPrefix(path, realRoot+"/")
 		// Skip metadata files (e.g. leap-seconds.list, +VERSION, posix/, right/)
 		if strings.HasPrefix(rel, "+") || strings.HasPrefix(rel, "posix/") || strings.HasPrefix(rel, "right/") || !strings.Contains(rel, "/") {
 			return nil
