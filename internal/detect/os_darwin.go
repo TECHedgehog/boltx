@@ -4,6 +4,7 @@ package detect
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -20,7 +21,19 @@ func DetectOS() OSInfo {
 		info.Hostname = h
 	}
 	info.IsRoot = os.Getuid() == 0
-	info.Locale = os.Getenv("LANG")
+	// $LANG is stripped by sudo; read the actual system preference via defaults.
+	if out, err := exec.Command("defaults", "read", "-g", "AppleLocale").Output(); err == nil {
+		loc := strings.TrimSpace(string(out))
+		if loc != "" {
+			if !strings.Contains(loc, ".") {
+				loc += ".UTF-8"
+			}
+			info.Locale = loc
+		}
+	}
+	if info.Locale == "" {
+		info.Locale = os.Getenv("LANG")
+	}
 	// /etc/localtime → e.g. /private/var/db/timezone/zoneinfo/Europe/Madrid
 	if t, err := os.Readlink("/etc/localtime"); err == nil {
 		if idx := strings.Index(t, "zoneinfo/"); idx >= 0 {

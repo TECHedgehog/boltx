@@ -126,6 +126,8 @@ func CreateUser(name, password string) error {
 	if out, err := exec.Command("dscl", ".", "-passwd", "/Users/"+name, password).CombinedOutput(); err != nil {
 		return fmt.Errorf("dscl -passwd %s: %w\n%s", name, err, strings.TrimSpace(string(out)))
 	}
+	// Flush DS cache so subsequent commands (e.g. AddSudo) see the new user.
+	exec.Command("dscacheutil", "-flushcache").Run()
 	return nil
 }
 
@@ -177,7 +179,7 @@ func AddSudo(name string) error {
 	if err != nil {
 		return err
 	}
-	out, err := exec.Command("dseditgroup", "-o", "edit", "-a", name, "-t", "user", group).CombinedOutput()
+	out, err := exec.Command("dseditgroup", "-o", "edit", "-n", "/Local/Default", "-a", name, "-t", "user", group).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("dseditgroup add %s to %s: %w\n%s", name, group, err, strings.TrimSpace(string(out)))
 	}
@@ -191,7 +193,7 @@ func RemoveSudo(name string) error {
 	if err != nil {
 		return err
 	}
-	out, err := exec.Command("dseditgroup", "-o", "edit", "-d", name, "-t", "user", group).CombinedOutput()
+	out, err := exec.Command("dseditgroup", "-o", "edit", "-n", "/Local/Default", "-d", name, "-t", "user", group).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("dseditgroup remove %s from %s: %w\n%s", name, group, err, strings.TrimSpace(string(out)))
 	}
