@@ -131,15 +131,16 @@ func CreateUser(name, password string) error {
 }
 
 // ChangePassword sets a new password for an existing user.
+// oldPassword is not needed on Linux when running as root.
 // Requires root privileges.
-func ChangePassword(name, password string) error {
+func ChangePassword(name, oldPassword, newPassword string) error {
 	if name == "" {
 		return fmt.Errorf("username cannot be empty")
 	}
-	if password == "" {
+	if newPassword == "" {
 		return fmt.Errorf("password cannot be empty")
 	}
-	return setPassword(name, password)
+	return setPassword(name, newPassword)
 }
 
 // RenameUser changes a user's login name and moves their home directory.

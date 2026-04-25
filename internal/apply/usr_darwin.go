@@ -112,34 +112,26 @@ func CreateUser(name, password string) error {
 }
 
 // ChangePassword sets a new password for an existing macOS user.
+// oldPassword is required on macOS to re-encrypt the Secure Token.
 // Requires root privileges.
-// Tries dscl first (simple local accounts), then sysadminctl (accounts with Secure Token).
-func ChangePassword(name, password string) error {
+func ChangePassword(name, oldPassword, newPassword string) error {
 	if name == "" {
 		return fmt.Errorf("username cannot be empty")
 	}
-	if password == "" {
+	if newPassword == "" {
 		return fmt.Errorf("password cannot be empty")
 	}
-	// dscl works as root for most local accounts.
-	if _, err := exec.Command("dscl", ".", "-passwd", "/Users/"+name, password).CombinedOutput(); err == nil {
-		return nil
-	}
-	// sysadminctl handles accounts with Secure Token on modern macOS.
-	// It exits 0 even on some failures, so we surface its output regardless.
 	out, err := exec.Command("/usr/sbin/sysadminctl",
-		"-resetPasswordFor", name, "-newPassword", password).CombinedOutput()
+		"-resetPasswordFor", name,
+		"-oldPassword", oldPassword,
+		"-newPassword", newPassword).CombinedOutput()
 	outStr := strings.TrimSpace(string(out))
 	if err != nil {
 		return fmt.Errorf("sysadminctl -resetPasswordFor %s: %w\n%s", name, err, outStr)
 	}
-	if outStr != "" {
-		lower := strings.ToLower(outStr)
-		if strings.Contains(lower, "error") || strings.Contains(lower, "failed") || strings.Contains(lower, "not found") {
-			return fmt.Errorf("sysadminctl %s: %s", name, outStr)
-		}
-		// Return output even on apparent success so the user can verify.
-		return fmt.Errorf("sysadminctl %s: %s (check if password changed)", name, outStr)
+	lower := strings.ToLower(outStr)
+	if strings.Contains(lower, "error") || strings.Contains(lower, "failed") || strings.Contains(lower, "permission") {
+		return fmt.Errorf("sysadminctl %s: %s", name, outStr)
 	}
 	return nil
 }

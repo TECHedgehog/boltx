@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -65,6 +66,7 @@ type UserEntry struct {
 	Name          string
 	OriginalName  string // system name at load time; empty for new users
 	Password      string // used for new user creation only
+	OldPassword   string // current password, required on macOS to re-encrypt Secure Token
 	NewPassword   string // used for existing user password change (deferred)
 	Sudo          bool
 	OriginalSudo  bool // sudo state at load time, for delta apply
@@ -387,7 +389,7 @@ func doApplyAll(pages []CategoryPage) tea.Cmd {
 						}
 					}
 					if u.NewPassword != "" {
-						err := apply.ChangePassword(u.Name, u.NewPassword)
+						err := apply.ChangePassword(u.Name, u.OldPassword, u.NewPassword)
 						results = append(results, applyResult{label: "Change password: " + u.Name, err: err})
 					}
 					if u.Sudo && !u.OriginalSudo {
@@ -586,30 +588,57 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							user.Name = val
 							m.editingOption = false
 						case usrOptPassword:
-							switch m.inputSubStep {
-							case 0:
-								if val == "" {
-									m.inputError = "password cannot be empty"
-									return m, nil
-								}
-								m.subValues[0] = val
-								m.inputSubStep = 1
-								m.textInput = newPasswordInput("Confirm:   ")
-							case 1:
-								if val != m.subValues[0] {
-									m.inputError = "passwords do not match"
+							if !user.Existing {
+								// New user: step 1=password, step 2=confirm.
+								switch m.inputSubStep {
+								case 1:
+									if val == "" {
+										m.inputError = "password cannot be empty"
+										return m, nil
+									}
+									m.subValues[1] = val
+									m.inputSubStep = 2
+									m.textInput = newPasswordInput("Confirm:   ")
+								case 2:
+									if val != m.subValues[1] {
+										m.inputError = "passwords do not match"
+										m.inputSubStep = 1
+										m.textInput = newPasswordInput("New password: ")
+										return m, nil
+									}
+									user.Password = m.subValues[1]
+									m.editingOption = false
 									m.inputSubStep = 0
+									m.subValues = [3]string{}
+								}
+							} else {
+								// Existing user: step 0=old (macOS only), 1=new, 2=confirm.
+								switch m.inputSubStep {
+								case 0:
+									m.subValues[0] = val
+									m.inputSubStep = 1
 									m.textInput = newPasswordInput("New password: ")
-									return m, nil
+								case 1:
+									if val == "" {
+										m.inputError = "password cannot be empty"
+										return m, nil
+									}
+									m.subValues[1] = val
+									m.inputSubStep = 2
+									m.textInput = newPasswordInput("Confirm:   ")
+								case 2:
+									if val != m.subValues[1] {
+										m.inputError = "passwords do not match"
+										m.inputSubStep = 1
+										m.textInput = newPasswordInput("New password: ")
+										return m, nil
+									}
+									user.OldPassword = m.subValues[0]
+									user.NewPassword = m.subValues[1]
+									m.editingOption = false
+									m.inputSubStep = 0
+									m.subValues = [3]string{}
 								}
-								if user.Existing {
-									user.NewPassword = m.subValues[0]
-								} else {
-									user.Password = m.subValues[0]
-								}
-								m.editingOption = false
-								m.inputSubStep = 0
-								m.subValues = [3]string{}
 							}
 						case usrOptSSHKey:
 							user.SSHKey = val
@@ -868,11 +897,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.inputError = ""
 							m.editingOption = true
 						case usrOptPassword:
-							m.textInput = newPasswordInput("New password: ")
 							m.usrEditingField = usrOptPassword
-							m.inputSubStep = 0
 							m.subValues = [3]string{}
 							m.inputError = ""
+							if user.Existing && runtime.GOOS == "darwin" {
+								m.textInput = newPasswordInput("Current pwd: ")
+								m.inputSubStep = 0 // 0=old, 1=new, 2=confirm
+							} else {
+								m.textInput = newPasswordInput("New password: ")
+								m.inputSubStep = 1 // 1=new, 2=confirm (Linux root skips old)
+							}
 							m.editingOption = true
 						case usrOptSudo:
 							user.Sudo = !user.Sudo
