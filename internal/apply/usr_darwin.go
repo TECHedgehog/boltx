@@ -9,10 +9,28 @@ import (
 	"strings"
 )
 
+// loadAdminMembers returns a set of usernames in the macOS admin group via dscl.
+// Falls back to /etc/group if dscl is unavailable.
+func loadAdminMembers() map[string]bool {
+	out, err := exec.Command("dscl", ".", "-read", "/Groups/admin", "GroupMembership").Output()
+	if err != nil {
+		return loadGroupMembers()
+	}
+	members := map[string]bool{}
+	for _, line := range strings.Split(string(out), "\n") {
+		// Line format: "GroupMembership: user1 user2 ..."
+		line = strings.TrimPrefix(line, "GroupMembership:")
+		for _, name := range strings.Fields(line) {
+			members[name] = true
+		}
+	}
+	return members
+}
+
 // LoadHumanUsers returns human users via dscl (macOS OpenDirectory).
 // Includes users with UID ≥ 501, skipping underscore-prefixed system accounts.
 func LoadHumanUsers() []HumanUser {
-	sudoMembers := loadGroupMembers()
+	sudoMembers := loadAdminMembers()
 
 	out, err := exec.Command("dscl", ".", "-list", "/Users", "UniqueID").Output()
 	if err != nil {
@@ -121,17 +139,10 @@ func ChangePassword(name, oldPassword, newPassword string) error {
 	if newPassword == "" {
 		return fmt.Errorf("password cannot be empty")
 	}
-	out, err := exec.Command("/usr/sbin/sysadminctl",
-		"-resetPasswordFor", name,
-		"-oldPassword", oldPassword,
-		"-newPassword", newPassword).CombinedOutput()
-	outStr := strings.TrimSpace(string(out))
+	// dscl with explicit old+new password handles Secure Token re-encryption.
+	out, err := exec.Command("dscl", ".", "-passwd", "/Users/"+name, oldPassword, newPassword).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("sysadminctl -resetPasswordFor %s: %w\n%s", name, err, outStr)
-	}
-	lower := strings.ToLower(outStr)
-	if strings.Contains(lower, "error") || strings.Contains(lower, "failed") || strings.Contains(lower, "permission") {
-		return fmt.Errorf("sysadminctl %s: %s", name, outStr)
+		return fmt.Errorf("dscl -passwd %s: %w\n%s", name, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
