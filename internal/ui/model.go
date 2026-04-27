@@ -25,17 +25,18 @@ var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
 // Key bindings shared across stages.
 var (
-	keyNav         = key.NewBinding(key.WithKeys("up", "down", "k", "j"), key.WithHelp("↑↓/jk", "navigate"))
-	keyTabNav      = key.NewBinding(key.WithKeys("left", "right", "h", "l"), key.WithHelp("←→/hl", "tab"))
-	keySelect      = key.NewBinding(key.WithKeys("enter", " "), key.WithHelp("enter/space", "toggle"))
-	keyConfirm     = key.NewBinding(key.WithKeys("enter", " "), key.WithHelp("enter", "confirm"))
-	keyBack        = key.NewBinding(key.WithKeys("q", "esc"), key.WithHelp("q/esc", "back"))
-	keyQuit        = key.NewBinding(key.WithKeys("q", "esc"), key.WithHelp("q/esc", "quit"))
-	keyHelpMore    = key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "more"))
-	keyHelpLess    = key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "less"))
-	keyTheme       = key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "theme"))
-	keyResetOption = key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "reset option"))
-	keyResetTab    = key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "reset tab"))
+	keyNav          = key.NewBinding(key.WithKeys("up", "down", "k", "j"), key.WithHelp("↑↓/jk", "navigate"))
+	keyTabNav       = key.NewBinding(key.WithKeys("left", "right", "h", "l"), key.WithHelp("←→/hl", "tab"))
+	keySelect       = key.NewBinding(key.WithKeys("enter", " "), key.WithHelp("enter/space", "toggle"))
+	keyConfirm      = key.NewBinding(key.WithKeys("enter", " "), key.WithHelp("enter", "confirm"))
+	keyBack         = key.NewBinding(key.WithKeys("q", "esc"), key.WithHelp("q/esc", "back"))
+	keyQuit         = key.NewBinding(key.WithKeys("q", "esc"), key.WithHelp("q/esc", "quit"))
+	keyHelpMore     = key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "more"))
+	keyHelpLess     = key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "less"))
+	keyTheme        = key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "theme"))
+	keyResetOption  = key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "reset option"))
+	keyRemoveSSHKey = key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "remove key"))
+	keyResetTab     = key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "reset tab"))
 )
 
 // maxOptionsPerPage is the maximum number of options shown per tab sub-page.
@@ -63,17 +64,18 @@ const (
 
 // UserEntry holds per-user configuration for the USR tab.
 type UserEntry struct {
-	Name          string
-	OriginalName  string // system name at load time; empty for new users
-	Password      string // used for new user creation only
-	OldPassword   string // current password, required on macOS to re-encrypt Secure Token
-	NewPassword   string // used for existing user password change (deferred)
-	Sudo          bool
-	OriginalSudo  bool // sudo state at load time, for delta apply
-	SSHKey        string
-	Existing      bool // loaded from the system, not pending creation
-	ActiveSession bool // user has running processes; username cannot be changed
-	PendingDelete bool // existing user marked for deletion at apply time
+	Name            string
+	OriginalName    string // system name at load time; empty for new users
+	Password        string // used for new user creation only
+	OldPassword     string // current password, required on macOS to re-encrypt Secure Token
+	NewPassword     string // used for existing user password change (deferred)
+	Sudo            bool
+	OriginalSudo    bool     // sudo state at load time, for delta apply
+	SSHKeys         []string // current key list (new + existing minus removed)
+	OriginalSSHKeys []string // loaded from authorized_keys at sync time; used to compute delta at GO!
+	Existing        bool     // loaded from the system, not pending creation
+	ActiveSession   bool     // user has running processes; username cannot be changed
+	PendingDelete   bool     // existing user marked for deletion at apply time
 }
 
 // Per-user option cursor positions within the USR tab body.
@@ -267,9 +269,12 @@ type Model struct {
 	inputError   string
 
 	// USR tab state — user sub-tabs and per-user editing.
-	usrSubTab       int // index into UserEntries; len(UserEntries) = "+ New User" tab
-	usrTabOffset    int // first visible entry index in the sub-tab bar
-	usrEditingField int // which per-user field is being edited (usrOpt* constants)
+	usrSubTab         int  // index into UserEntries; len(UserEntries) = "+ New User" tab
+	usrTabOffset      int  // first visible entry index in the sub-tab bar
+	usrEditingField   int  // which per-user field is being edited (usrOpt* constants)
+	usrEditingSSHList  bool   // SSH key list sub-mode is open for current user
+	usrSSHListCursor   int    // cursor in SSH list: 0..len(items)-1 = key; len(items) = "Add new key"
+	usrSSHEditingOrigKey string // non-empty when editing an existing key (holds the original key being replaced)
 
 	// Option selecting — active while a KindSelect picker is open.
 	selectingOption bool
@@ -379,8 +384,12 @@ func doApplyAll(pages []CategoryPage) tea.Cmd {
 						err = apply.AddSudo(u.Name)
 						results = append(results, applyResult{label: "Add sudo: " + u.Name, err: err})
 					}
+					for _, k := range u.SSHKeys {
+						err = apply.AddSSHKey(u.Name, k)
+						results = append(results, applyResult{label: "SSH key (" + apply.SSHKeyComment(k) + "): " + u.Name, err: err})
+					}
 				} else {
-					// Existing user: rename first, then password/sudo delta.
+					// Existing user: rename first, then password/sudo/SSH delta.
 					if u.OriginalName != "" && u.Name != u.OriginalName {
 						err := apply.RenameUser(u.OriginalName, u.Name)
 						results = append(results, applyResult{label: "Rename user: " + u.OriginalName + "→" + u.Name, err: err})
@@ -398,6 +407,26 @@ func doApplyAll(pages []CategoryPage) tea.Cmd {
 					} else if !u.Sudo && u.OriginalSudo {
 						err := apply.RemoveSudo(u.Name)
 						results = append(results, applyResult{label: "Remove sudo: " + u.Name, err: err})
+					}
+					origSet := map[string]bool{}
+					for _, k := range u.OriginalSSHKeys {
+						origSet[k] = true
+					}
+					newSet := map[string]bool{}
+					for _, k := range u.SSHKeys {
+						newSet[k] = true
+					}
+					for _, k := range u.SSHKeys {
+						if !origSet[k] {
+							err := apply.AddSSHKey(u.Name, k)
+							results = append(results, applyResult{label: "SSH key add (" + apply.SSHKeyComment(k) + "): " + u.Name, err: err})
+						}
+					}
+					for _, k := range u.OriginalSSHKeys {
+						if !newSet[k] {
+							err := apply.RemoveSSHKey(u.Name, k)
+							results = append(results, applyResult{label: "SSH key remove (" + apply.SSHKeyComment(k) + "): " + u.Name, err: err})
+						}
 					}
 				}
 			}
@@ -497,6 +526,76 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							break
 						}
 					}
+				}
+			}
+			return m, nil
+		}
+
+		// SSH key list sub-mode: navigate/add/remove keys before entering text input.
+		if m.usrEditingSSHList && !m.editingOption {
+			nUsers := len(m.categoryPages[tabIndexUSR].UserEntries)
+			if m.usrSubTab < nUsers {
+				user := &m.categoryPages[tabIndexUSR].UserEntries[m.usrSubTab]
+				items := sshKeyDisplayItems(*user)
+				addIdx := len(items)
+				switch msg.String() {
+				case "up", "k":
+					if m.usrSSHListCursor > 0 {
+						m.usrSSHListCursor--
+					}
+				case "down", "j":
+					if m.usrSSHListCursor < addIdx {
+						m.usrSSHListCursor++
+					}
+				case "r":
+					if m.usrSSHListCursor < addIdx {
+						item := items[m.usrSSHListCursor]
+						if item.pendingRemove {
+							// undo: restore key to active set
+							user.SSHKeys = append(user.SSHKeys, item.key)
+						} else if item.existing {
+							// flag for removal: drop from SSHKeys (stays visible as pending)
+							for i, k := range user.SSHKeys {
+								if k == item.key {
+									user.SSHKeys = append(user.SSHKeys[:i], user.SSHKeys[i+1:]...)
+									break
+								}
+							}
+						} else {
+							// newly added key: discard entirely, clamp cursor
+							for i, k := range user.SSHKeys {
+								if k == item.key {
+									user.SSHKeys = append(user.SSHKeys[:i], user.SSHKeys[i+1:]...)
+									break
+								}
+							}
+							newLen := len(sshKeyDisplayItems(*user))
+							if m.usrSSHListCursor > newLen {
+								m.usrSSHListCursor = newLen
+							}
+						}
+					}
+				case "enter", " ":
+					ti := textinput.New()
+					ti.Focus()
+					m.usrEditingField = usrOptSSHKey
+					m.inputError = ""
+					if m.usrSSHListCursor < addIdx && !items[m.usrSSHListCursor].pendingRemove {
+						item := items[m.usrSSHListCursor]
+						ti.Prompt = "Edit key:  "
+						ti.SetValue(item.key)
+						m.usrSSHEditingOrigKey = item.key
+					} else if m.usrSSHListCursor == addIdx {
+						ti.Prompt = "Paste key: "
+						m.usrSSHEditingOrigKey = ""
+					} else {
+						break // pending-remove row: enter does nothing
+					}
+					m.textInput = ti
+					m.editingOption = true
+				case "esc", "q":
+					m.usrEditingSSHList = false
+					m.inputError = ""
 				}
 			}
 			return m, nil
@@ -641,8 +740,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 								}
 							}
 						case usrOptSSHKey:
-							user.SSHKey = val
+							if err := apply.ValidateSSHKey(val); err != nil {
+								m.inputError = err.Error()
+								return m, nil
+							}
+							// dup check: ignore the key being replaced
+							for _, k := range user.SSHKeys {
+								if k == val && k != m.usrSSHEditingOrigKey {
+									m.textInput.SetValue("")
+									m.inputError = "already added — paste a different key"
+									return m, nil
+								}
+							}
+							if m.usrSSHEditingOrigKey != "" {
+								// edit: replace old key with new
+								for i, k := range user.SSHKeys {
+									if k == m.usrSSHEditingOrigKey {
+										user.SSHKeys[i] = val
+										break
+									}
+								}
+								m.usrSSHEditingOrigKey = ""
+							} else {
+								user.SSHKeys = append(user.SSHKeys, val)
+							}
+							m.usrSSHListCursor = len(sshKeyDisplayItems(*user)) // point to "Add new key"
 							m.editingOption = false
+							// stay in usrEditingSSHList mode
 						}
 					}
 				} else {
@@ -657,6 +781,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.inputSubStep = 0
 				m.subValues = [3]string{}
 				m.inputError = ""
+				m.usrSSHEditingOrigKey = ""
+				// If we were adding/editing a key inside the SSH list, stay in list mode.
+				// (usrEditingSSHList remains true; the list handler takes over next key.)
 			default:
 				var cmd tea.Cmd
 				m.textInput, cmd = m.textInput.Update(msg)
@@ -690,7 +817,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						case usrOptSudo:
 							user.Sudo = false
 						case usrOptSSHKey:
-							user.SSHKey = ""
+							user.SSHKeys = nil
 						}
 					}
 				} else {
@@ -709,7 +836,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if m.usrSubTab < nUsers {
 						u := &m.categoryPages[tabIndexUSR].UserEntries[m.usrSubTab]
 						u.Sudo = false
-						u.SSHKey = ""
+						u.SSHKeys = nil
 					}
 				} else {
 					for i := range m.categoryPages[m.activeTab].Options {
@@ -911,14 +1038,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						case usrOptSudo:
 							user.Sudo = !user.Sudo
 						case usrOptSSHKey:
-							ti := textinput.New()
-							ti.Prompt = "SSH key:   "
-							ti.SetValue(user.SSHKey)
-							ti.Focus()
-							m.textInput = ti
-							m.usrEditingField = usrOptSSHKey
+							m.usrEditingSSHList = true
+							m.usrSSHListCursor = len(sshKeyDisplayItems(*user)) // default to "+ Add new key"
 							m.inputError = ""
-							m.editingOption = true
 						case usrOptDelete:
 							u := &m.categoryPages[tabIndexUSR].UserEntries[m.usrSubTab]
 							if u.Existing {
@@ -1268,9 +1390,18 @@ func (m Model) viewHints(maxWidth int) string {
 
 	if m.helpExpanded {
 		if m.page == pageReview {
+			resetBinding := keyResetOption
+			if m.activeTab == tabIndexUSR && m.usrEditingSSHList {
+				entries := m.categoryPages[tabIndexUSR].UserEntries
+				if m.usrSubTab < len(entries) {
+					if m.usrSSHListCursor < len(sshKeyDisplayItems(entries[m.usrSubTab])) {
+						resetBinding = keyRemoveSSHKey
+					}
+				}
+			}
 			groups := [][]key.Binding{
 				{keyNav, keyTabNav},
-				{keySelect, keyBack, keyResetOption, keyResetTab},
+				{keySelect, keyBack, resetBinding, keyResetTab},
 				{keyTheme, keyHelpLess},
 			}
 			return "\n\n" + h.FullHelpView(groups)
@@ -1522,9 +1653,11 @@ func (m Model) viewUSRBody(maxWidth int) string {
 		value string
 		idx   int
 	}
-	sshVal := user.SSHKey
-	if sshVal == "" {
-		sshVal = "(none)"
+	var sshVal string
+	if len(user.SSHKeys) == 0 {
+		sshVal = "(0)"
+	} else {
+		sshVal = fmt.Sprintf("(%d)", len(user.SSHKeys))
 	}
 	pwVal := "••••••"
 	if user.Existing {
@@ -1541,7 +1674,7 @@ func (m Model) viewUSRBody(maxWidth int) string {
 		{label: "Username", value: usernameVal, idx: usrOptUsername},
 		{label: "Password", value: pwVal, idx: usrOptPassword},
 		{label: "Sudo", idx: usrOptSudo},
-		{label: "SSH key", value: sshVal, idx: usrOptSSHKey},
+		{label: "SSH keys", value: sshVal, idx: usrOptSSHKey},
 	}
 	for _, row := range rows {
 		isCursor := m.categoryPageCursor == row.idx
@@ -1561,9 +1694,54 @@ func (m Model) viewUSRBody(maxWidth int) string {
 			}
 			b.WriteString(renderOptionLine(cur, marker, "Sudo", style, maxWidth) + "\n")
 		} else {
-			b.WriteString(renderOptionLine(cur, kindTextInputMarker, row.label+": ", style, maxWidth))
+			listMarker := kindTextInputMarker
+			if row.idx == usrOptSSHKey {
+				if m.usrEditingSSHList {
+					listMarker = kindListExpanded
+				} else {
+					listMarker = kindListCollapsed
+				}
+			}
+			b.WriteString(renderOptionLine(cur, listMarker, row.label+": ", style, maxWidth))
 			b.WriteString(mutedStyle.Render(row.value) + "\n")
-if isCursor && m.editingOption {
+			if isCursor && m.usrEditingSSHList {
+				indent := strings.Repeat(" ", lipgloss.Width(cur+kindTextInputMarker))
+				pendingStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Strikethrough(true)
+				items := sshKeyDisplayItems(user)
+				addIdx := len(items)
+				for i, item := range items {
+					liCur := "  "
+					isCursorItem := m.usrSSHListCursor == i
+					if item.pendingRemove {
+						hint := mutedStyle.Render("  [r: undo]")
+						label := pendingStyle.Render(apply.SSHKeyComment(item.key))
+						if isCursorItem {
+							liCur = cursorStr
+						}
+						b.WriteString(indent + liCur + label + hint + "\n")
+					} else {
+						liStyle := normalStyle
+						if isCursorItem {
+							liCur = cursorStr
+							liStyle = selectedStyle
+						}
+						b.WriteString(indent + liCur + liStyle.Render(apply.SSHKeyComment(item.key)) + mutedStyle.Render("  [enter: edit  r: remove]") + "\n")
+					}
+				}
+				addCur := "  "
+				addStyle := mutedStyle
+				if m.usrSSHListCursor == addIdx {
+					addCur = cursorStr
+					addStyle = selectedStyle
+				}
+				b.WriteString(indent + addCur + addStyle.Render("+ Add new key") + "\n")
+				if m.editingOption {
+					b.WriteString(indent + "  " + m.textInput.View() + "\n")
+				}
+				if m.inputError != "" {
+					b.WriteString(indent + "  " + errorStyle.Render("✗ "+m.inputError) + "\n")
+				}
+			} else if isCursor && m.editingOption {
 				indent := strings.Repeat(" ", lipgloss.Width(cur+kindTextInputMarker))
 				b.WriteString(indent + m.textInput.View() + "\n")
 				if m.inputError != "" {
@@ -1587,6 +1765,36 @@ if isCursor && m.editingOption {
 	b.WriteString("\n" + curDel + deleteStyle.Render(deleteLabel) + "\n")
 
 	return b.String()
+}
+
+// sshKeyItem is one row in the SSH key list sub-UI.
+type sshKeyItem struct {
+	key           string
+	existing      bool // loaded from authorized_keys (OriginalSSHKeys)
+	pendingRemove bool // existing key the user flagged for removal (not in SSHKeys)
+}
+
+// sshKeyDisplayItems builds the ordered display list for the SSH key list sub-UI:
+// original keys first (pending-remove if absent from SSHKeys), then newly added keys.
+func sshKeyDisplayItems(u UserEntry) []sshKeyItem {
+	origSet := map[string]bool{}
+	for _, k := range u.OriginalSSHKeys {
+		origSet[k] = true
+	}
+	activeSet := map[string]bool{}
+	for _, k := range u.SSHKeys {
+		activeSet[k] = true
+	}
+	var items []sshKeyItem
+	for _, k := range u.OriginalSSHKeys {
+		items = append(items, sshKeyItem{key: k, existing: true, pendingRemove: !activeSet[k]})
+	}
+	for _, k := range u.SSHKeys {
+		if !origSet[k] {
+			items = append(items, sshKeyItem{key: k, existing: false})
+		}
+	}
+	return items
 }
 
 // usrTabLabels builds the display labels for all user sub-tabs including "+ New User".
@@ -1900,10 +2108,54 @@ func (m Model) viewCategoryReview() string {
 // are 2 lines tall (top border, bottom connector). Bottom-aligning them makes
 // the active tab rise above the ghost tabs. All open bottoms connect to the
 // separator below.
+// userHasChanges reports whether a UserEntry will produce any work at GO! time.
+func userHasChanges(u UserEntry) bool {
+	if !u.Existing {
+		return true // new user to create
+	}
+	if u.PendingDelete {
+		return true
+	}
+	if u.OriginalName != "" && u.Name != u.OriginalName {
+		return true
+	}
+	if u.NewPassword != "" {
+		return true
+	}
+	if u.Sudo != u.OriginalSudo {
+		return true
+	}
+	// SSH key delta: any add or remove?
+	origSet := map[string]bool{}
+	for _, k := range u.OriginalSSHKeys {
+		origSet[k] = true
+	}
+	for _, k := range u.SSHKeys {
+		if !origSet[k] {
+			return true // key to add
+		}
+	}
+	activeSet := map[string]bool{}
+	for _, k := range u.SSHKeys {
+		activeSet[k] = true
+	}
+	for _, k := range u.OriginalSSHKeys {
+		if !activeSet[k] {
+			return true // key to remove
+		}
+	}
+	return false
+}
+
 // checkedCount returns the number of checked options with a non-nil ApplyFn
 // in the given page — i.e. changes that will be applied on GO!.
 func checkedCount(page CategoryPage) int {
-	n := len(page.UserEntries)
+	n := 0
+	for _, u := range page.UserEntries {
+		if userHasChanges(u) {
+			n++
+		}
+	}
 	for _, opt := range page.Options {
 		if opt.Checked && opt.ApplyFn != nil {
 			n++
@@ -1956,9 +2208,16 @@ func syncUsrTab(pages []CategoryPage) []CategoryPage {
 		if existing[hu.Name] {
 			continue
 		}
+		loadedKeys := apply.LoadSSHKeys(hu.Name)
 		pages[tabIndexUSR].UserEntries = append(
 			pages[tabIndexUSR].UserEntries,
-			UserEntry{Name: hu.Name, OriginalName: hu.Name, Sudo: hu.Sudo, OriginalSudo: hu.Sudo, Existing: true, ActiveSession: apply.HasActiveProcesses(hu.Name)},
+			UserEntry{
+				Name: hu.Name, OriginalName: hu.Name,
+				Sudo: hu.Sudo, OriginalSudo: hu.Sudo,
+				Existing: true, ActiveSession: apply.HasActiveProcesses(hu.Name),
+				SSHKeys:         append([]string(nil), loadedKeys...),
+				OriginalSSHKeys: loadedKeys,
+			},
 		)
 	}
 	return pages
