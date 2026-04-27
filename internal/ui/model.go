@@ -98,7 +98,6 @@ type CategoryOption struct {
 	ApplyFn         func(string) error // deferred to GO! tab; nil = not yet implemented
 	NeedsRoot       bool               // if true, hidden when not running as root
 	SelectItems     []string           // valid choices for KindSelect; populated at build time
-	PasswordConfirm bool               // if true, KindTextInput collects password + confirm after the value
 }
 
 // CategoryPage groups related options under a category name.
@@ -262,7 +261,7 @@ type Model struct {
 	// Only one option can be edited at a time.
 	editingOption bool
 	textInput     textinput.Model
-	// Multi-step input — used when opt.PasswordConfirm is true.
+	// Multi-step input — used by the USR tab's username/password flows.
 	// Steps: 0=main value, 1=password, 2=confirm.
 	inputSubStep int
 	subValues    [3]string
@@ -490,7 +489,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		// While a KindSelect picker is open, intercept navigation keys.
 		if m.selectingOption {
-			const visibleItems = 5
 			switch msg.String() {
 			case "up", "k":
 				if m.selectCursor > 0 {
@@ -521,7 +519,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					for i, item := range m.selectItems {
 						if strings.HasPrefix(strings.ToLower(item), kl) {
 							m.selectCursor = i
-							const visibleItems = 5
 							m.selectViewport = max(0, m.selectCursor-visibleItems/2)
 							break
 						}
@@ -1090,7 +1087,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 									break
 								}
 							}
-							const visibleItems = 5
 							m.selectViewport = max(0, m.selectCursor-visibleItems/2)
 							m.selectingOption = true
 						default: // KindToggle
@@ -1617,7 +1613,6 @@ func (m Model) viewCategoryReviewAboveSep() string {
 // viewUSRBody renders the USR tab body: secondary user sub-tab row + per-user options.
 func (m Model) viewUSRBody(maxWidth int) string {
 	var b strings.Builder
-	errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444"))
 	users := m.categoryPages[tabIndexUSR].UserEntries
 
 	if !m.osInfo.IsRoot {
@@ -1752,7 +1747,6 @@ func (m Model) viewUSRBody(maxWidth int) string {
 	}
 
 	// Delete user row — danger color, always last.
-	deleteStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444"))
 	isCursorDel := m.categoryPageCursor == usrOptDelete
 	curDel := noCursorStr
 	if isCursorDel {
@@ -1762,7 +1756,7 @@ func (m Model) viewUSRBody(maxWidth int) string {
 	if user.PendingDelete {
 		deleteLabel = "Undo delete"
 	}
-	b.WriteString("\n" + curDel + deleteStyle.Render(deleteLabel) + "\n")
+	b.WriteString("\n" + curDel + errorStyle.Render(deleteLabel) + "\n")
 
 	return b.String()
 }
@@ -1917,10 +1911,7 @@ func (m Model) viewCategoryReviewBody(maxWidth int) string {
 			if displayVal == "" {
 				displayVal = opt.Default
 			}
-			// For PasswordConfirm options, only show the username portion.
-			if opt.PasswordConfirm && strings.Contains(displayVal, "\n") {
-				displayVal = strings.SplitN(displayVal, "\n", 2)[0]
-			}
+
 			b.WriteString(renderOptionLine(cursor, kindTextInputMarker, opt.Label+": ", itemStyle, colW))
 			b.WriteString(mutedStyle.Render(displayVal) + "\n")
 			// When this option is being edited, render the inline text input below it.
@@ -1928,7 +1919,7 @@ func (m Model) viewCategoryReviewBody(maxWidth int) string {
 				indent := strings.Repeat(" ", lipgloss.Width(cursor+kindTextInputMarker))
 				b.WriteString(indent + m.textInput.View() + "\n")
 				if m.inputError != "" {
-					b.WriteString(indent + lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Render("✗ "+m.inputError) + "\n")
+					b.WriteString(indent + errorStyle.Render("✗ "+m.inputError) + "\n")
 				}
 			}
 		case KindSelect:
@@ -1940,7 +1931,6 @@ func (m Model) viewCategoryReviewBody(maxWidth int) string {
 			b.WriteString(mutedStyle.Render(displayVal) + "\n")
 			// When this option is being selected, render the inline picker below it.
 			if isCursor && m.selectingOption {
-				const visibleItems = 5
 				indent := strings.Repeat(" ", lipgloss.Width(cursor+kindSelectMarker))
 				end := min(m.selectViewport+visibleItems, len(m.selectItems))
 				for idx := m.selectViewport; idx < end; idx++ {
@@ -1971,7 +1961,6 @@ func (m Model) viewCategoryReviewBody(maxWidth int) string {
 // viewGOBody renders the GO! tab body across its three lifecycle states.
 func (m Model) viewGOBody(maxWidth int) string {
 	var b strings.Builder
-	errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444"))
 
 	switch m.applyState {
 	case applyRunning:

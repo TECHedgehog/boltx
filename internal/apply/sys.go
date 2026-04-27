@@ -61,7 +61,6 @@ func validateTimezone(zone string) error {
 	return nil
 }
 
-
 // Timezone sets the system timezone.
 // Tries timedatectl set-timezone first (systemd); falls back to symlinking
 // /etc/localtime and writing /etc/timezone. The symlink fallback also works on macOS.

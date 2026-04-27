@@ -57,6 +57,9 @@ func init() {
 	applyTheme(Themes[0])
 }
 
+// visibleItems is the number of rows shown in the KindSelect inline picker.
+const visibleItems = 5
+
 // Style vars — reassigned by applyTheme, read by view functions.
 var (
 	titleStyle           lipgloss.Style
@@ -69,12 +72,15 @@ var (
 	infoTableBorderStyle lipgloss.Style
 	activeTabStyle       lipgloss.Style
 
-	cursorStr          = "› "
-	noCursorStr        = "  "
-	radioOn            = "● "
-	radioOff           = "○ "
-	kindTextInputMarker  = "▶ " // 2-cell width, same as radioOn/radioOff
-	kindSelectMarker     = "≡ " // 2-cell width, same as radioOn/radioOff
-	kindListCollapsed    = "▸ " // expandable list, collapsed
-	kindListExpanded     = "▾ " // expandable list, expanded
+	// errorStyle is fixed red — not part of the theme palette.
+	errorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444"))
+
+	cursorStr           = "› "
+	noCursorStr         = "  "
+	radioOn             = "● "
+	radioOff            = "○ "
+	kindTextInputMarker = "▶ " // 2-cell width, same as radioOn/radioOff
+	kindSelectMarker    = "≡ " // 2-cell width, same as radioOn/radioOff
+	kindListCollapsed   = "▸ " // expandable list, collapsed
+	kindListExpanded    = "▾ " // expandable list, expanded
 )
