@@ -81,7 +81,7 @@ var (
 	radioOff            = "○ "
 	kindTextInputMarker = "▶ " // 2-cell width, same as radioOn/radioOff
 	kindSelectMarker    = "≡ " // 2-cell width, same as radioOn/radioOff
-	kindCycleMarker     = "⊕ " // 2-cell width, same as radioOn/radioOff
+	kindCycleMarker     = "↻ " // 2-cell width, same as radioOn/radioOff
 	kindListCollapsed   = "▸ " // expandable list, collapsed
 	kindListExpanded    = "▾ " // expandable list, expanded
 )

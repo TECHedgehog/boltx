@@ -35,6 +35,9 @@ func DisableFirewall() error {
 }
 
 func restartSSHD() error {
+	if _, err := exec.Command("launchctl", "list", "com.openssh.sshd").CombinedOutput(); err != nil {
+		return fmt.Errorf("SSH not enabled — enable Remote Login in System Settings > General > Sharing first")
+	}
 	cmds := [][]string{
 		{"launchctl", "stop", "com.openssh.sshd"},
 		{"launchctl", "start", "com.openssh.sshd"},
@@ -47,5 +50,7 @@ func restartSSHD() error {
 	}
 	return nil
 }
+
+func updateFirewallForPort(_, _ string) error { return nil }
 
 func firewallActive() bool { return false }

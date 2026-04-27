@@ -101,6 +101,7 @@ type CategoryOption struct {
 	OriginalChecked bool               // Checked state at sync time; delta apply skips if Checked==OriginalChecked
 	NeedsRoot       bool               // if true, hidden when not running as root
 	SelectItems     []string           // valid choices for KindSelect; populated at build time
+	ClearOnEdit     bool               // KindTextInput: open with empty field (placeholder = Default) instead of pre-filling Value
 }
 
 // CategoryPage groups related options under a category name.
@@ -191,6 +192,15 @@ func buildCategoryPages(uc detect.UseCase, osInfo detect.OSInfo) []CategoryPage 
 					NeedsRoot: true,
 					ApplyFn:   func(_ string) error { return apply.DisablePasswordAuth() },
 					UndoFn:    func(_ string) error { return apply.EnablePasswordAuth() },
+				},
+				{
+					Label:       "SSH: Port",
+					Kind:        KindTextInput,
+					Checked:     false,
+					NeedsRoot:   true,
+					Default:     "22",
+					ClearOnEdit: true,
+					ApplyFn:     func(v string) error { return apply.ApplySSHPort(v) },
 				},
 				{
 					Label:     "Enable UFW firewall",
@@ -884,7 +894,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					absIdx := m.tabSubPage*maxOptionsPerPage + m.categoryPageCursor
 					page := m.categoryPages[m.activeTab]
 					if absIdx < len(page.Options) {
-						m.categoryPages[m.activeTab].Options[absIdx].Value = ""
+						resetOption(&m.categoryPages[m.activeTab].Options[absIdx])
 					}
 				}
 			}
@@ -910,7 +920,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				} else {
 					for i := range m.categoryPages[m.activeTab].Options {
-						m.categoryPages[m.activeTab].Options[i].Value = ""
+						resetOption(&m.categoryPages[m.activeTab].Options[i])
 					}
 				}
 			}
@@ -1139,11 +1149,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						case KindTextInput:
 							ti := textinput.New()
 							ti.Placeholder = opt.Default
-							editVal := opt.Value
-							if editVal == "" {
-								editVal = opt.Default
+							if opt.ClearOnEdit {
+								ti.SetValue("")
+							} else {
+								editVal := opt.Value
+								if editVal == "" {
+									editVal = opt.Default
+								}
+								ti.SetValue(editVal)
 							}
-							ti.SetValue(editVal)
 							ti.Focus()
 							m.textInput = ti
 							m.editingOption = true
@@ -2333,6 +2347,7 @@ func syncSecTab(pages []CategoryPage) []CategoryPage {
 	opts := pages[tabIndexSEC].Options
 	permitRootLogin, _ := apply.DetectSSHDConfig("PermitRootLogin")
 	pwAuth, _ := apply.DetectSSHDConfig("PasswordAuthentication")
+	sshPort, _ := apply.DetectSSHDConfig("Port")
 	fwActive := apply.FirewallActive()
 	for i := range opts {
 		switch opts[i].Label {
@@ -2344,6 +2359,10 @@ func syncSecTab(pages []CategoryPage) []CategoryPage {
 		case "SSH: Require key auth only":
 			opts[i].Checked = pwAuth == "no"
 			opts[i].OriginalChecked = opts[i].Checked
+		case "SSH: Port":
+			if sshPort != "" {
+				opts[i].Default = sshPort
+			}
 		case "Enable UFW firewall":
 			opts[i].Checked = fwActive
 			opts[i].OriginalChecked = opts[i].Checked
@@ -2352,6 +2371,20 @@ func syncSecTab(pages []CategoryPage) []CategoryPage {
 	pages[tabIndexSEC].Options = opts
 	pages[tabIndexSEC].Synced = true
 	return pages
+}
+
+// resetOption reverts a single CategoryOption to its detected/default state.
+// KindCycle: restores Value to Default (detected sshd value).
+// KindTextInput: clears Value and unchecks (opt-in option deselected).
+// Others: no-op (Value is not meaningful).
+func resetOption(opt *CategoryOption) {
+	switch opt.Kind {
+	case KindCycle:
+		opt.Value = opt.Default
+	case KindTextInput:
+		opt.Value = ""
+		opt.Checked = false
+	}
 }
 
 // syncPkgTab auto-toggles packages required by other tabs' checked options.

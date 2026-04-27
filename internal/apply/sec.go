@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 )
 
@@ -13,6 +14,23 @@ const (
 	boltxConfPath   = "/etc/ssh/sshd_config.d/00-boltx.conf"
 	sshdIncludeLine = "Include /etc/ssh/sshd_config.d/*.conf"
 )
+
+// opensshSupportsInclude returns true when the installed sshd is OpenSSH ≥ 7.3,
+// which introduced the Include directive (2016).
+func opensshSupportsInclude() bool {
+	out, _ := exec.Command("sshd", "-V").CombinedOutput()
+	s := string(out)
+	idx := strings.Index(s, "OpenSSH_")
+	if idx < 0 {
+		return false
+	}
+	ver := s[idx+len("OpenSSH_"):]
+	var major, minor int
+	if n, _ := fmt.Sscanf(ver, "%d.%d", &major, &minor); n < 2 {
+		return false
+	}
+	return major > 7 || (major == 7 && minor >= 3)
+}
 
 // ensureSSHDDropIn creates the sshd_config.d/ directory if absent, then
 // inserts "Include /etc/ssh/sshd_config.d/*.conf" after the leading comment
@@ -67,13 +85,35 @@ func ensureSSHDDropIn() error {
 	return os.WriteFile(sshdConfigPath, []byte(content), 0644)
 }
 
-// editBoltxConf sets key=value in 99-boltx.conf, creating the drop-in
-// infrastructure first if needed.
+// editBoltxConf sets key=value in the appropriate sshd config location.
+// OpenSSH ≥ 7.3: uses the drop-in at 00-boltx.conf (takes precedence via Include).
+// OpenSSH < 7.3: edits sshd_config directly.
 func editBoltxConf(key, value string) error {
-	if err := ensureSSHDDropIn(); err != nil {
+	if os.Getuid() != 0 {
+		return fmt.Errorf("must run as root to modify sshd config")
+	}
+	if opensshSupportsInclude() {
+		if err := ensureSSHDDropIn(); err != nil {
+			return err
+		}
+		return editSSHDConfigAt(boltxConfPath, key, value)
+	}
+	return editSSHDConfigAt(sshdConfigPath, key, value)
+}
+
+// ApplySSHPort writes Port to sshd config, updates the firewall if active, then restarts sshd.
+func ApplySSHPort(port string) error {
+	oldPort, _ := DetectSSHDConfig("Port")
+	if oldPort == "" {
+		oldPort = "22"
+	}
+	if err := editBoltxConf("Port", port); err != nil {
 		return err
 	}
-	return editSSHDConfigAt(boltxConfPath, key, value)
+	if err := updateFirewallForPort(oldPort, port); err != nil {
+		return fmt.Errorf("port set; firewall update failed: %w", err)
+	}
+	return restartSSHD()
 }
 
 // editSSHDConfigAt sets key to value in the given sshd_config-format file.

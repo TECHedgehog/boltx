@@ -27,7 +27,7 @@ func EnablePasswordAuth() error {
 // EnableFirewall configures UFW with deny-incoming defaults and enables it.
 func EnableFirewall() error {
 	if _, err := exec.LookPath("ufw"); err != nil {
-		return fmt.Errorf("ufw not found — install it first (apt install ufw)")
+		return fmt.Errorf("ufw not found — install ufw first")
 	}
 	cmds := [][]string{
 		{"ufw", "default", "deny", "incoming"},
@@ -45,14 +45,35 @@ func EnableFirewall() error {
 }
 
 func restartSSHD() error {
+	// systemd
 	for _, svc := range []string{"sshd", "ssh"} {
-		if out, err := exec.Command("systemctl", "restart", svc).CombinedOutput(); err == nil {
+		if _, err := exec.Command("systemctl", "restart", svc).CombinedOutput(); err == nil {
 			return nil
-		} else {
-			_ = out
 		}
 	}
-	return fmt.Errorf("could not restart sshd: neither 'sshd' nor 'ssh' service found via systemctl")
+	// OpenRC (Alpine, Gentoo)
+	if _, err := exec.Command("rc-service", "sshd", "restart").CombinedOutput(); err == nil {
+		return nil
+	}
+	// SysV
+	for _, svc := range []string{"sshd", "ssh"} {
+		if _, err := exec.Command("service", svc, "restart").CombinedOutput(); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("could not restart sshd: no supported init system found (tried systemctl, rc-service, service)")
+}
+
+func updateFirewallForPort(oldPort, newPort string) error {
+	if !firewallActive() {
+		return nil
+	}
+	if out, err := exec.Command("ufw", "allow", newPort+"/tcp").CombinedOutput(); err != nil {
+		return fmt.Errorf("ufw allow %s/tcp: %w\n%s", newPort, err, strings.TrimSpace(string(out)))
+	}
+	exec.Command("ufw", "delete", "allow", oldPort+"/tcp").Run()
+	exec.Command("ufw", "delete", "allow", "OpenSSH").Run()
+	return nil
 }
 
 // DisableFirewall disables UFW.
