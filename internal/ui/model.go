@@ -60,6 +60,7 @@ const (
 	KindToggle    OptionKind = iota // checkbox on/off — no extra component
 	KindTextInput                   // single-line text, backed by bubbles/textinput
 	KindSelect                      // pick from a list; items stored in SelectItems
+	KindCycle                       // cycles through SelectItems on space/enter; Value holds current
 )
 
 // UserEntry holds per-user configuration for the USR tab.
@@ -95,7 +96,9 @@ type CategoryOption struct {
 	Checked         bool               // will this option be applied?
 	Default         string             // detected current value (shown as placeholder)
 	Value           string             // user-supplied value; empty → use Default on apply
-	ApplyFn         func(string) error // deferred to GO! tab; nil = not yet implemented
+	ApplyFn         func(string) error // deferred to GO! tab; called when Checked=true
+	UndoFn          func(string) error // deferred to GO! tab; called when Checked=false (reverts the option)
+	OriginalChecked bool               // Checked state at sync time; delta apply skips if Checked==OriginalChecked
 	NeedsRoot       bool               // if true, hidden when not running as root
 	SelectItems     []string           // valid choices for KindSelect; populated at build time
 }
@@ -106,6 +109,7 @@ type CategoryPage struct {
 	Icon        string
 	Options     []CategoryOption
 	UserEntries []UserEntry // USR tab only — users to be created
+	Synced      bool        // true after first syncOnTabEnter; prevents overwriting user changes
 }
 
 // subPageCount returns the number of sub-pages needed for nOptions.
@@ -118,7 +122,7 @@ func subPageCount(nOptions int) int {
 
 // buildCategoryPages returns all category pages with defaults pre-filled for the given use case.
 // Options marked NeedsRoot are omitted when osInfo.IsRoot is false.
-func buildCategoryPages(_ detect.UseCase, osInfo detect.OSInfo) []CategoryPage {
+func buildCategoryPages(uc detect.UseCase, osInfo detect.OSInfo) []CategoryPage {
 	placeholder := func(label string) CategoryOption {
 		return CategoryOption{Label: label, Kind: KindToggle}
 	}
@@ -170,11 +174,33 @@ func buildCategoryPages(_ detect.UseCase, osInfo detect.OSInfo) []CategoryPage {
 		},
 		{
 			Name: "SEC",
-			Options: []CategoryOption{
-				placeholder("Placeholder A"),
-				placeholder("Placeholder B"),
-				placeholder("Placeholder C"),
-			},
+			Options: filter([]CategoryOption{
+				{
+					Label:       "SSH: Permit root login",
+					Kind:        KindCycle,
+					Checked:     true,
+					NeedsRoot:   true,
+					SelectItems: []string{"no", "prohibit-password", "forced-commands-only", "yes"},
+					Value:       "no",
+					ApplyFn:     func(v string) error { return apply.ApplySSHOption("PermitRootLogin", v) },
+				},
+				{
+					Label:     "SSH: Require key auth only",
+					Kind:      KindToggle,
+					Checked:   uc == detect.UseCaseVPS,
+					NeedsRoot: true,
+					ApplyFn:   func(_ string) error { return apply.DisablePasswordAuth() },
+					UndoFn:    func(_ string) error { return apply.EnablePasswordAuth() },
+				},
+				{
+					Label:     "Enable UFW firewall",
+					Kind:      KindToggle,
+					Checked:   uc == detect.UseCaseVPS,
+					NeedsRoot: true,
+					ApplyFn:   func(_ string) error { return apply.EnableFirewall() },
+					UndoFn:    func(_ string) error { return apply.DisableFirewall() },
+				},
+			}),
 		},
 		{
 			Name: "NET",
@@ -430,15 +456,33 @@ func doApplyAll(pages []CategoryPage) tea.Cmd {
 				}
 			}
 			for _, opt := range pg.Options {
-				if !opt.Checked || opt.ApplyFn == nil {
-					continue
-				}
 				v := opt.Value
 				if v == "" {
 					v = opt.Default
 				}
-				err := opt.ApplyFn(v)
-				results = append(results, applyResult{label: opt.Label, err: err})
+				switch opt.Kind {
+				case KindCycle:
+					// Only apply if user changed from detected state.
+					if opt.ApplyFn != nil && opt.Value != opt.Default {
+						err := opt.ApplyFn(v)
+						results = append(results, applyResult{label: opt.Label, err: err})
+					}
+				default:
+					if opt.UndoFn != nil {
+						// Tracked toggle: apply/undo only on delta from detected state.
+						if opt.Checked && !opt.OriginalChecked && opt.ApplyFn != nil {
+							err := opt.ApplyFn(v)
+							results = append(results, applyResult{label: opt.Label, err: err})
+						} else if !opt.Checked && opt.OriginalChecked {
+							err := opt.UndoFn(v)
+							results = append(results, applyResult{label: opt.Label + " (revert)", err: err})
+						}
+					} else if opt.Checked && opt.ApplyFn != nil {
+						// Untracked toggle (SYS tab etc.): always apply when checked.
+						err := opt.ApplyFn(v)
+						results = append(results, applyResult{label: opt.Label, err: err})
+					}
+				}
 			}
 		}
 		return applyDoneMsg{results: results}
@@ -1118,6 +1162,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							}
 							m.selectViewport = max(0, m.selectCursor-visibleItems/2)
 							m.selectingOption = true
+						case KindCycle:
+							items := opt.SelectItems
+							if len(items) > 0 {
+								next := 0
+								for i, v := range items {
+									if v == opt.Value {
+										next = (i + 1) % len(items)
+										break
+									}
+								}
+								opt.Value = items[next]
+							}
 						default: // KindToggle
 							opt.Checked = !opt.Checked
 						}
@@ -1971,6 +2027,9 @@ func (m Model) viewCategoryReviewBody(maxWidth int) string {
 					}
 				}
 			}
+		case KindCycle:
+			b.WriteString(renderOptionLine(cursor, kindCycleMarker, opt.Label+": ", itemStyle, colW))
+			b.WriteString(mutedStyle.Render(opt.Value) + "\n")
 		default: // KindToggle
 			radio := radioOff
 			if opt.Checked {
@@ -2165,8 +2224,8 @@ func userHasChanges(u UserEntry) bool {
 	return false
 }
 
-// checkedCount returns the number of checked options with a non-nil ApplyFn
-// in the given page — i.e. changes that will be applied on GO!.
+// checkedCount returns the number of options that will produce work at GO! time:
+// checked options with ApplyFn, or unchecked options with UndoFn.
 func checkedCount(page CategoryPage) int {
 	n := 0
 	for _, u := range page.UserEntries {
@@ -2175,8 +2234,19 @@ func checkedCount(page CategoryPage) int {
 		}
 	}
 	for _, opt := range page.Options {
-		if opt.Checked && opt.ApplyFn != nil {
-			n++
+		switch opt.Kind {
+		case KindCycle:
+			if opt.ApplyFn != nil && opt.Value != opt.Default {
+				n++
+			}
+		default:
+			if opt.UndoFn != nil {
+				if opt.Checked != opt.OriginalChecked {
+					n++
+				}
+			} else if opt.Checked && opt.ApplyFn != nil {
+				n++
+			}
 		}
 	}
 	return n
@@ -2207,6 +2277,8 @@ func syncOnTabEnter(tabIdx int, pages []CategoryPage) []CategoryPage {
 	switch tabIdx {
 	case tabIndexUSR:
 		return syncUsrTab(pages)
+	case tabIndexSEC:
+		return syncSecTab(pages)
 	case tabIndexPKG:
 		return syncPkgTab(pages)
 	case tabIndexRUN:
@@ -2251,6 +2323,36 @@ const (
 	tabIndexRUN = 5
 	tabIndexGO  = 6
 )
+
+// syncSecTab detects current SSH and firewall state and pre-checks options accordingly.
+// Runs only on first tab entry; subsequent entries preserve user-toggled state.
+func syncSecTab(pages []CategoryPage) []CategoryPage {
+	if pages[tabIndexSEC].Synced {
+		return pages
+	}
+	opts := pages[tabIndexSEC].Options
+	permitRootLogin, _ := apply.DetectSSHDConfig("PermitRootLogin")
+	pwAuth, _ := apply.DetectSSHDConfig("PasswordAuthentication")
+	fwActive := apply.FirewallActive()
+	for i := range opts {
+		switch opts[i].Label {
+		case "SSH: Permit root login":
+			if permitRootLogin != "" {
+				opts[i].Value = permitRootLogin
+				opts[i].Default = permitRootLogin
+			}
+		case "SSH: Require key auth only":
+			opts[i].Checked = pwAuth == "no"
+			opts[i].OriginalChecked = opts[i].Checked
+		case "Enable UFW firewall":
+			opts[i].Checked = fwActive
+			opts[i].OriginalChecked = opts[i].Checked
+		}
+	}
+	pages[tabIndexSEC].Options = opts
+	pages[tabIndexSEC].Synced = true
+	return pages
+}
 
 // syncPkgTab auto-toggles packages required by other tabs' checked options.
 // Stub — logic added when PKG options are implemented.
