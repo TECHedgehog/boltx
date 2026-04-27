@@ -593,6 +593,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case "esc", "q":
 					m.usrEditingSSHList = false
 					m.inputError = ""
+				case "?":
+					m.helpExpanded = !m.helpExpanded
 				}
 			}
 			return m, nil
@@ -808,13 +810,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						user := &m.categoryPages[tabIndexUSR].UserEntries[m.usrSubTab]
 						switch m.categoryPageCursor {
 						case usrOptUsername:
-							user.Name = ""
+							if user.Existing {
+								user.Name = user.OriginalName
+							} else {
+								user.Name = ""
+							}
 						case usrOptPassword:
-							user.Password = ""
+							if user.Existing {
+								user.OldPassword = ""
+								user.NewPassword = ""
+							} else {
+								user.Password = ""
+							}
 						case usrOptSudo:
-							user.Sudo = false
+							if user.Existing {
+								user.Sudo = user.OriginalSudo
+							} else {
+								user.Sudo = false
+							}
 						case usrOptSSHKey:
-							user.SSHKeys = nil
+							if user.Existing {
+								user.SSHKeys = append([]string(nil), user.OriginalSSHKeys...)
+							} else {
+								user.SSHKeys = nil
+							}
 						}
 					}
 				} else {
@@ -832,8 +851,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					nUsers := len(m.categoryPages[tabIndexUSR].UserEntries)
 					if m.usrSubTab < nUsers {
 						u := &m.categoryPages[tabIndexUSR].UserEntries[m.usrSubTab]
-						u.Sudo = false
-						u.SSHKeys = nil
+						if u.Existing {
+							u.Name = u.OriginalName
+							u.OldPassword = ""
+							u.NewPassword = ""
+							u.Sudo = u.OriginalSudo
+							u.SSHKeys = append([]string(nil), u.OriginalSSHKeys...)
+						} else {
+							u.Name = ""
+							u.Password = ""
+							u.Sudo = false
+							u.SSHKeys = nil
+						}
 					}
 				} else {
 					for i := range m.categoryPages[m.activeTab].Options {
