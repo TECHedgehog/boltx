@@ -11,17 +11,18 @@ Built for people who know what they want but don't want to type the same command
 | Tab | What you can set |
 |-----|-----------------|
 | SYS | Hostname, locale, timezone |
-| USR | Create users, set passwords, sudo access, SSH keys |
-| SEC | Firewall, fail2ban, SSH hardening |
-| NET | Web servers, reverse proxies |
+| USR | Create/rename/delete users, passwords, sudo, SSH keys |
+| SEC | SSH hardening (root login, key-only auth, port), UFW firewall |
+| NET | Ports, proxies, fail2ban |
 | PKG | System updates, essential packages |
+| RUN | Shell, automation, and system lifecycle tools |
 | GO! | Review and apply everything |
 
 Pick your options across tabs, then hit GO! to apply them all.
 
 ## Status
 
-Early development. SYS tab is fully working. USR tab (user creation and password management) is in progress. Other tabs are placeholders.
+Early development. SYS, USR, and SEC tabs fully working. NET, PKG, and RUN tabs are placeholders.
 
 ## Keybindings
 
@@ -66,9 +67,10 @@ Most apply steps require root (`sudo`).
 - [x] Per-category options with tab navigation
 - [x] Theme switching
 - [x] SYS tab: hostname, locale, timezone
+- [x] SEC tab: SSH hardening, UFW firewall
 - [x] Exit prompt after apply
-- [ ] USR tab: user creation, passwords, sudo, SSH keys (in progress)
-- [ ] SEC, NET, PKG tab options
+- [x] USR tab: multi-user management, rename, passwords, sudo, SSH keys
+- [ ] NET, PKG, RUN tab options
 
 ## Support
 
