@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -99,6 +100,15 @@ func editBoltxConf(key, value string) error {
 		return editSSHDConfigAt(boltxConfPath, key, value)
 	}
 	return editSSHDConfigAt(sshdConfigPath, key, value)
+}
+
+// ValidatePort returns an error if s is not a valid TCP port number (1–65535).
+func ValidatePort(s string) error {
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("port must be a number between 1 and 65535")
+	}
+	return nil
 }
 
 // ApplySSHPort writes Port to sshd config, updates the firewall if active, then restarts sshd.

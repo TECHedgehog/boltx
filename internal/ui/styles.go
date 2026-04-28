@@ -13,7 +13,7 @@ func tabBorderWithBottom(left, middle, right string) lipgloss.Border {
 	return b
 }
 
-// Theme holds the four colors that define a visual theme.
+// Theme holds the colors that define a visual theme.
 // To add a new theme, append a Theme{} literal to the Themes slice below.
 type Theme struct {
 	Name    string
@@ -21,13 +21,14 @@ type Theme struct {
 	Muted   lipgloss.Color // secondary text: hints, descriptions, inactive
 	Text    lipgloss.Color // default text content
 	Success lipgloss.Color // suggestions / positive indicators
+	Queued  lipgloss.Color // pending/queued changes — must not repeat any other slot in this theme
 }
 
 // Themes is the ordered list of available themes. Press 't' to cycle through them.
 var Themes = []Theme{
-	{Name: "Purple", Accent: "#7C3AED", Muted: "#6B7280", Text: "#F9FAFB", Success: "#10B981"},
-	{Name: "Teal",   Accent: "#0D9488", Muted: "#6B7280", Text: "#F9FAFB", Success: "#FBBF24"},
-	{Name: "Amber",  Accent: "#D97706", Muted: "#6B7280", Text: "#F9FAFB", Success: "#10B981"},
+	{Name: "Purple", Accent: "#7C3AED", Muted: "#6B7280", Text: "#F9FAFB", Success: "#10B981", Queued: "#F59E0B"},
+	{Name: "Teal",   Accent: "#0D9488", Muted: "#6B7280", Text: "#F9FAFB", Success: "#FBBF24", Queued: "#F97316"},
+	{Name: "Amber",  Accent: "#D97706", Muted: "#6B7280", Text: "#F9FAFB", Success: "#10B981", Queued: "#FBBF24"},
 }
 
 // applyTheme reassigns all style vars to match theme t.
@@ -39,6 +40,7 @@ func applyTheme(t Theme) {
 	normalStyle   = lipgloss.NewStyle().Foreground(t.Text)
 	mutedStyle    = lipgloss.NewStyle().Foreground(t.Muted)
 	greenStyle    = lipgloss.NewStyle().Foreground(t.Success)
+	queuedStyle = lipgloss.NewStyle().Foreground(t.Queued)
 	boxStyle = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(t.Accent)
@@ -68,6 +70,7 @@ var (
 	normalStyle          lipgloss.Style
 	mutedStyle           lipgloss.Style
 	greenStyle           lipgloss.Style
+	queuedStyle          lipgloss.Style
 	boxStyle             lipgloss.Style
 	infoTableBorderStyle lipgloss.Style
 	activeTabStyle       lipgloss.Style

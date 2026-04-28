@@ -70,12 +70,21 @@ func (e Environment) SuggestedUseCase() UseCase {
 	return UseCaseDevMachine
 }
 
+// viaSSH detects whether the current process was started over an SSH connection.
+// Checks env vars first (fast), then walks the process tree (catches VSCode Remote SSH).
+func viaSSH() bool {
+	if os.Getenv("SSH_CLIENT") != "" || os.Getenv("SSH_TTY") != "" || os.Getenv("SSH_CONNECTION") != "" {
+		return true
+	}
+	return viaSSHProc()
+}
+
 // Detect reads system state to determine the environment.
 // detectVirt() is implemented per-platform in virt_linux.go / virt_darwin.go.
 func Detect() Environment {
 	return Environment{
 		Virt:        detectVirt(),
-		ViaSSH:      os.Getenv("SSH_CLIENT") != "" || os.Getenv("SSH_TTY") != "",
+		ViaSSH:      viaSSH(),
 		HasPublicIP: hasPublicIP(),
 	}
 }

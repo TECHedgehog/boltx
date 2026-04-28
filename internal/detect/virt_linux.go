@@ -3,7 +3,9 @@
 package detect
 
 import (
+	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -64,4 +66,35 @@ func detectVirt() VirtType {
 	}
 
 	return VirtNone
+}
+
+// viaSSHProc walks the parent process chain looking for an sshd ancestor.
+// Handles VSCode Remote SSH, which doesn't propagate SSH_CLIENT/SSH_TTY.
+func viaSSHProc() bool {
+	pid := os.Getpid()
+	for range 32 { // cap depth to avoid infinite loops
+		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+		if err != nil {
+			return false
+		}
+		var ppid int
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "PPid:") {
+				ppid, _ = strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "PPid:")))
+				break
+			}
+		}
+		if ppid <= 1 {
+			return false
+		}
+		comm, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", ppid))
+		if err != nil {
+			return false
+		}
+		if strings.TrimSpace(string(comm)) == "sshd" {
+			return true
+		}
+		pid = ppid
+	}
+	return false
 }

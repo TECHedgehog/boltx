@@ -102,6 +102,7 @@ type CategoryOption struct {
 	NeedsRoot       bool               // if true, hidden when not running as root
 	SelectItems     []string           // valid choices for KindSelect; populated at build time
 	ClearOnEdit     bool               // KindTextInput: open with empty field (placeholder = Default) instead of pre-filling Value
+	ValidateFn      func(string) error // optional: called on confirm; blocks save if non-nil error
 }
 
 // CategoryPage groups related options under a category name.
@@ -200,6 +201,7 @@ func buildCategoryPages(uc detect.UseCase, osInfo detect.OSInfo) []CategoryPage 
 					NeedsRoot:   true,
 					Default:     "22",
 					ClearOnEdit: true,
+					ValidateFn:  func(v string) error { return apply.ValidatePort(v) },
 					ApplyFn:     func(v string) error { return apply.ApplySSHPort(v) },
 				},
 				{
@@ -583,7 +585,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// SSH key list sub-mode: navigate/add/remove keys before entering text input.
-		if m.usrEditingSSHList && !m.editingOption {
+		if m.activeTab == tabIndexUSR && m.usrEditingSSHList && !m.editingOption {
 			nUsers := len(m.categoryPages[tabIndexUSR].UserEntries)
 			if m.usrSubTab < nUsers {
 				user := &m.categoryPages[tabIndexUSR].UserEntries[m.usrSubTab]
@@ -825,7 +827,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else {
 					absIdx := m.tabSubPage*maxOptionsPerPage + m.categoryPageCursor
 					opt := &m.categoryPages[m.activeTab].Options[absIdx]
-					opt.Value = m.textInput.Value()
+					val := m.textInput.Value()
+					if opt.ValidateFn != nil {
+						if err := opt.ValidateFn(val); err != nil {
+							m.inputError = err.Error()
+							break
+						}
+					}
+					opt.Value = val
 					opt.Checked = true
 					m.editingOption = false
 				}
@@ -951,6 +960,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.activeTab--
 					m.tabSubPage = 0
 					m.categoryPageCursor = 0
+					m.editingOption = false
+					m.selectingOption = false
+					m.usrEditingSSHList = false
+					m.inputError = ""
 					m.categoryPages = syncOnTabEnter(m.activeTab, m.categoryPages)
 				}
 			}
@@ -967,6 +980,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.activeTab++
 					m.tabSubPage = 0
 					m.categoryPageCursor = 0
+					m.editingOption = false
+					m.selectingOption = false
+					m.usrEditingSSHList = false
+					m.inputError = ""
 					m.categoryPages = syncOnTabEnter(m.activeTab, m.categoryPages)
 				}
 			}
@@ -1148,7 +1165,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						switch opt.Kind {
 						case KindTextInput:
 							ti := textinput.New()
-							ti.Placeholder = opt.Default
+							placeholder := opt.Default
+							if opt.ClearOnEdit && opt.Value != "" {
+								placeholder = opt.Value
+							}
+							ti.Placeholder = placeholder
+							ti.Width = 40
 							if opt.ClearOnEdit {
 								ti.SetValue("")
 							} else {
@@ -1747,6 +1769,7 @@ func (m Model) viewUSRBody(maxWidth int) string {
 		value string
 		idx   int
 	}
+	sshAdded, sshRemoved := sshKeyDelta(user)
 	var sshVal string
 	if len(user.SSHKeys) == 0 {
 		sshVal = "(0)"
@@ -1764,6 +1787,13 @@ func (m Model) viewUSRBody(maxWidth int) string {
 	if user.ActiveSession {
 		usernameVal = user.Name + " (active — log out to rename)"
 	}
+
+	// Queued flags per row.
+	usernameQueued := !user.Existing || (!user.ActiveSession && user.OriginalName != "" && user.Name != user.OriginalName)
+	passwordQueued := user.Password != "" || user.NewPassword != ""
+	sudoQueued := (!user.Existing && user.Sudo) || (user.Existing && user.Sudo != user.OriginalSudo)
+	sshQueued := sshAdded > 0 || sshRemoved > 0
+
 	rows := []usrRow{
 		{label: "Username", value: usernameVal, idx: usrOptUsername},
 		{label: "Password", value: pwVal, idx: usrOptPassword},
@@ -1781,12 +1811,34 @@ func (m Model) viewUSRBody(maxWidth int) string {
 		if row.idx == usrOptUsername && m.visualBell {
 			style = errorStyle
 		}
+
+		// Per-row queued state.
+		var rowQueued bool
+		switch row.idx {
+		case usrOptUsername:
+			rowQueued = usernameQueued
+		case usrOptPassword:
+			rowQueued = passwordQueued
+		case usrOptSudo:
+			rowQueued = sudoQueued
+		case usrOptSSHKey:
+			rowQueued = sshQueued
+		}
+		valStyle := mutedStyle
+		if rowQueued {
+			valStyle = queuedStyle
+		}
+
 		if row.idx == usrOptSudo {
 			marker := radioOff
 			if user.Sudo {
 				marker = radioOn
 			}
-			b.WriteString(renderOptionLine(cur, marker, "Sudo", style, maxWidth) + "\n")
+			line := renderOptionLine(cur, marker, "Sudo", style, maxWidth)
+			if sudoQueued {
+				line += queuedStyle.Render(" ·")
+			}
+			b.WriteString(line + "\n")
 		} else {
 			listMarker := kindTextInputMarker
 			if row.idx == usrOptSSHKey {
@@ -1797,7 +1849,24 @@ func (m Model) viewUSRBody(maxWidth int) string {
 				}
 			}
 			b.WriteString(renderOptionLine(cur, listMarker, row.label+": ", style, maxWidth))
-			b.WriteString(mutedStyle.Render(row.value) + "\n")
+			if row.idx == usrOptSSHKey {
+				b.WriteString(mutedStyle.Render(sshVal))
+				if sshAdded > 0 || sshRemoved > 0 {
+					b.WriteString(" ")
+					if sshAdded > 0 {
+						b.WriteString(queuedStyle.Render(fmt.Sprintf("+%d", sshAdded)))
+					}
+					if sshRemoved > 0 {
+						if sshAdded > 0 {
+							b.WriteString(" ")
+						}
+						b.WriteString(queuedStyle.Render(fmt.Sprintf("-%d", sshRemoved)))
+					}
+				}
+				b.WriteString("\n")
+			} else {
+				b.WriteString(valStyle.Render(row.value) + "\n")
+			}
 			if isCursor && m.usrEditingSSHList {
 				indent := strings.Repeat(" ", lipgloss.Width(cur+kindTextInputMarker))
 				pendingStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Strikethrough(true)
@@ -1858,6 +1927,29 @@ func (m Model) viewUSRBody(maxWidth int) string {
 	b.WriteString("\n" + curDel + errorStyle.Render(deleteLabel) + "\n")
 
 	return b.String()
+}
+
+// sshKeyDelta returns the count of keys added and removed relative to OriginalSSHKeys.
+func sshKeyDelta(u UserEntry) (added, removed int) {
+	origSet := map[string]bool{}
+	for _, k := range u.OriginalSSHKeys {
+		origSet[k] = true
+	}
+	activeSet := map[string]bool{}
+	for _, k := range u.SSHKeys {
+		activeSet[k] = true
+	}
+	for _, k := range u.SSHKeys {
+		if !origSet[k] {
+			added++
+		}
+	}
+	for _, k := range u.OriginalSSHKeys {
+		if !activeSet[k] {
+			removed++
+		}
+	}
+	return
 }
 
 // sshKeyItem is one row in the SSH key list sub-UI.
@@ -2004,17 +2096,27 @@ func (m Model) viewCategoryReviewBody(maxWidth int) string {
 			itemStyle = selectedStyle
 		}
 
+		dirty := isOptionQueued(opt)
+		valStyle := mutedStyle
+		if dirty {
+			valStyle = queuedStyle
+		}
+
 		switch opt.Kind {
 		case KindTextInput:
-			displayVal := opt.Value
-			if displayVal == "" {
-				displayVal = opt.Default
+			editing := isCursor && m.editingOption
+			var displayVal string
+			if !editing {
+				displayVal = opt.Value
+				if displayVal == "" {
+					displayVal = opt.Default
+				}
 			}
 
 			b.WriteString(renderOptionLine(cursor, kindTextInputMarker, opt.Label+": ", itemStyle, colW))
-			b.WriteString(mutedStyle.Render(displayVal) + "\n")
+			b.WriteString(valStyle.Render(displayVal) + "\n")
 			// When this option is being edited, render the inline text input below it.
-			if isCursor && m.editingOption {
+			if editing {
 				indent := strings.Repeat(" ", lipgloss.Width(cursor+kindTextInputMarker))
 				b.WriteString(indent + m.textInput.View() + "\n")
 				if m.inputError != "" {
@@ -2027,7 +2129,7 @@ func (m Model) viewCategoryReviewBody(maxWidth int) string {
 				displayVal = opt.Default
 			}
 			b.WriteString(renderOptionLine(cursor, kindSelectMarker, opt.Label+": ", itemStyle, colW))
-			b.WriteString(mutedStyle.Render(displayVal) + "\n")
+			b.WriteString(valStyle.Render(displayVal) + "\n")
 			// When this option is being selected, render the inline picker below it.
 			if isCursor && m.selectingOption {
 				indent := strings.Repeat(" ", lipgloss.Width(cursor+kindSelectMarker))
@@ -2043,13 +2145,17 @@ func (m Model) viewCategoryReviewBody(maxWidth int) string {
 			}
 		case KindCycle:
 			b.WriteString(renderOptionLine(cursor, kindCycleMarker, opt.Label+": ", itemStyle, colW))
-			b.WriteString(mutedStyle.Render(opt.Value) + "\n")
+			b.WriteString(valStyle.Render(opt.Value) + "\n")
 		default: // KindToggle
 			radio := radioOff
 			if opt.Checked {
 				radio = radioOn
 			}
-			b.WriteString(renderOptionLine(cursor, radio, opt.Label, itemStyle, colW) + "\n")
+			line := renderOptionLine(cursor, radio, opt.Label, itemStyle, colW)
+			if dirty {
+				line += queuedStyle.Render(" ·")
+			}
+			b.WriteString(line + "\n")
 		}
 	}
 
@@ -2236,6 +2342,21 @@ func userHasChanges(u UserEntry) bool {
 		}
 	}
 	return false
+}
+
+// isOptionQueued reports whether an option differs from its session-start state.
+func isOptionQueued(opt CategoryOption) bool {
+	switch opt.Kind {
+	case KindCycle:
+		return opt.Value != opt.Default
+	case KindTextInput, KindSelect:
+		return opt.Value != "" && opt.Value != opt.Default
+	default: // KindToggle
+		if opt.UndoFn != nil {
+			return opt.Checked != opt.OriginalChecked
+		}
+		return opt.Checked
+	}
 }
 
 // checkedCount returns the number of options that will produce work at GO! time:
