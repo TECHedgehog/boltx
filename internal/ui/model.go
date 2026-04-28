@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -61,7 +62,39 @@ const (
 	KindTextInput                   // single-line text, backed by bubbles/textinput
 	KindSelect                      // pick from a list; items stored in SelectItems
 	KindCycle                       // cycles through SelectItems on space/enter; Value holds current
+	KindPortList // expandable port rule list (NET tab firewall)
 )
+
+// portRuleKey identifies a firewall rule by its values, ignoring the Existing flag.
+type portRuleKey struct{ From, To, Protocol string }
+
+func portRuleKeySet(rules []apply.PortRule) map[portRuleKey]bool {
+	set := make(map[portRuleKey]bool, len(rules))
+	for _, r := range rules {
+		set[portRuleKey{r.From, r.To, r.Protocol}] = true
+	}
+	return set
+}
+
+// netPreset describes a named group of port rules available in "Add presets".
+type netPreset struct {
+	Label string
+	Rules []apply.PortRule
+}
+
+var netPresets = []netPreset{
+	{"Web (80, 443)", []apply.PortRule{
+		{From: "80", Protocol: "tcp"},
+		{From: "443", Protocol: "tcp"},
+	}},
+	{"Minecraft (25565)", []apply.PortRule{
+		{From: "25565", Protocol: "tcp"},
+		{From: "25565", Protocol: "udp"},
+	}},
+	{"SSH (22)", []apply.PortRule{
+		{From: "22", Protocol: "tcp"},
+	}},
+}
 
 // UserEntry holds per-user configuration for the USR tab.
 type UserEntry struct {
@@ -89,20 +122,31 @@ const (
 	usrOptCount    = 5
 )
 
+// Apply priority tiers — lower value executes first in GO!
+const (
+	PrioPackageInstall = 10 // PKG tab: install packages
+	PrioConfigWrite    = 20 // config file writes (SYS, SEC, NET)
+	PrioServiceRestart = 30 // service enable/restart (sshd, fail2ban)
+	PrioFirewallRule   = 40 // UFW rule changes
+)
+
 // CategoryOption is a single setting within a category page.
 type CategoryOption struct {
-	Label           string
-	Kind            OptionKind
-	Checked         bool               // will this option be applied?
-	Default         string             // detected current value (shown as placeholder)
-	Value           string             // user-supplied value; empty → use Default on apply
-	ApplyFn         func(string) error // deferred to GO! tab; called when Checked=true
-	UndoFn          func(string) error // deferred to GO! tab; called when Checked=false (reverts the option)
-	OriginalChecked bool               // Checked state at sync time; delta apply skips if Checked==OriginalChecked
-	NeedsRoot       bool               // if true, hidden when not running as root
-	SelectItems     []string           // valid choices for KindSelect; populated at build time
-	ClearOnEdit     bool               // KindTextInput: open with empty field (placeholder = Default) instead of pre-filling Value
-	ValidateFn      func(string) error // optional: called on confirm; blocks save if non-nil error
+	Label            string
+	Kind             OptionKind
+	Checked          bool               // will this option be applied?
+	Default          string             // detected current value (shown as placeholder)
+	Value            string             // user-supplied value; empty → use Default on apply
+	ApplyFn          func(string) error // deferred to GO! tab; called when Checked=true
+	UndoFn           func(string) error // deferred to GO! tab; called when Checked=false (reverts the option)
+	OriginalChecked  bool               // Checked state at sync time; delta apply skips if Checked==OriginalChecked
+	NeedsRoot        bool               // if true, hidden when not running as root
+	SelectItems      []string           // valid choices for KindSelect; populated at build time
+	ClearOnEdit      bool               // KindTextInput: open with empty field (placeholder = Default) instead of pre-filling Value
+	ValidateFn       func(string) error // optional: called on confirm; blocks save if non-nil error
+	Priority         int                // GO! execution order; lower = earlier; 0 treated as PrioConfigWrite
+	PortRules         []apply.PortRule // KindPortList: current list of port rules (existing + new)
+	DetectedPortRules []apply.PortRule // KindPortList: rules detected from live system at sync time
 }
 
 // CategoryPage groups related options under a category name.
@@ -125,9 +169,6 @@ func subPageCount(nOptions int) int {
 // buildCategoryPages returns all category pages with defaults pre-filled for the given use case.
 // Options marked NeedsRoot are omitted when osInfo.IsRoot is false.
 func buildCategoryPages(uc detect.UseCase, osInfo detect.OSInfo) []CategoryPage {
-	placeholder := func(label string) CategoryOption {
-		return CategoryOption{Label: label, Kind: KindToggle}
-	}
 	filter := func(opts []CategoryOption) []CategoryOption {
 		if osInfo.IsRoot {
 			return opts
@@ -149,6 +190,7 @@ func buildCategoryPages(uc detect.UseCase, osInfo detect.OSInfo) []CategoryPage 
 					Kind:      KindTextInput,
 					Default:   osInfo.Hostname,
 					NeedsRoot: true,
+					Priority:  PrioConfigWrite,
 					ApplyFn:   func(v string) error { return apply.Hostname(v) },
 				},
 				{
@@ -156,6 +198,7 @@ func buildCategoryPages(uc detect.UseCase, osInfo detect.OSInfo) []CategoryPage 
 					Kind:        KindSelect,
 					Default:     osInfo.Locale,
 					NeedsRoot:   true,
+					Priority:    PrioConfigWrite,
 					SelectItems: detect.DetectLocales(),
 					ApplyFn:     func(v string) error { return apply.Locale(v) },
 				},
@@ -164,6 +207,7 @@ func buildCategoryPages(uc detect.UseCase, osInfo detect.OSInfo) []CategoryPage 
 					Kind:        KindSelect,
 					Default:     osInfo.Timezone,
 					NeedsRoot:   true,
+					Priority:    PrioConfigWrite,
 					SelectItems: detect.DetectTimezones(),
 					ApplyFn:     func(v string) error { return apply.Timezone(v) },
 				},
@@ -184,6 +228,7 @@ func buildCategoryPages(uc detect.UseCase, osInfo detect.OSInfo) []CategoryPage 
 					NeedsRoot:   true,
 					SelectItems: []string{"no", "prohibit-password", "forced-commands-only", "yes"},
 					Value:       "no",
+					Priority:    PrioConfigWrite,
 					ApplyFn:     func(v string) error { return apply.ApplySSHOption("PermitRootLogin", v) },
 				},
 				{
@@ -191,6 +236,7 @@ func buildCategoryPages(uc detect.UseCase, osInfo detect.OSInfo) []CategoryPage 
 					Kind:      KindToggle,
 					Checked:   uc == detect.UseCaseVPS,
 					NeedsRoot: true,
+					Priority:  PrioConfigWrite,
 					ApplyFn:   func(_ string) error { return apply.DisablePasswordAuth() },
 					UndoFn:    func(_ string) error { return apply.EnablePasswordAuth() },
 				},
@@ -201,6 +247,7 @@ func buildCategoryPages(uc detect.UseCase, osInfo detect.OSInfo) []CategoryPage 
 					NeedsRoot:   true,
 					Default:     "22",
 					ClearOnEdit: true,
+					Priority:    PrioConfigWrite,
 					ValidateFn:  func(v string) error { return apply.ValidatePort(v) },
 					ApplyFn:     func(v string) error { return apply.ApplySSHPort(v) },
 				},
@@ -209,6 +256,7 @@ func buildCategoryPages(uc detect.UseCase, osInfo detect.OSInfo) []CategoryPage 
 					Kind:      KindToggle,
 					Checked:   uc == detect.UseCaseVPS,
 					NeedsRoot: true,
+					Priority:  PrioFirewallRule,
 					ApplyFn:   func(_ string) error { return apply.EnableFirewall() },
 					UndoFn:    func(_ string) error { return apply.DisableFirewall() },
 				},
@@ -216,11 +264,40 @@ func buildCategoryPages(uc detect.UseCase, osInfo detect.OSInfo) []CategoryPage 
 		},
 		{
 			Name: "NET",
-			Options: []CategoryOption{
-				placeholder("Placeholder A"),
-				placeholder("Placeholder B"),
-				placeholder("Placeholder C"),
-			},
+			Options: filter([]CategoryOption{
+				{
+					Label:     "FW: Open ports",
+					Kind:      KindPortList,
+					NeedsRoot: true,
+					Priority:  PrioFirewallRule,
+				},
+				{
+					Label:       "Proxy",
+					Kind:        KindCycle,
+					SelectItems: []string{"none", "traefik", "nginx"},
+					Default:     "none",
+					Value:       "none",
+					Priority:    PrioConfigWrite,
+					ApplyFn:     func(v string) error { return apply.SetProxyManager(v) },
+				},
+				{
+					Label:     "Enable fail2ban",
+					Kind:      KindToggle,
+					NeedsRoot: true,
+					Priority:  PrioServiceRestart,
+					ApplyFn:   func(_ string) error { return apply.EnableFail2ban() },
+					UndoFn:    func(_ string) error { return apply.DisableFail2ban() },
+				},
+				{
+					Label:       "fail2ban: Preset",
+					Kind:        KindCycle,
+					SelectItems: []string{"ssh", "web", "all"},
+					Default:     "ssh",
+					Value:       "ssh",
+					Priority:    PrioConfigWrite,
+					ApplyFn:     func(v string) error { return apply.WriteFail2banConfig(v) },
+				},
+			}),
 		},
 		{
 			Name: "PKG",
@@ -306,12 +383,23 @@ type Model struct {
 	inputError   string
 
 	// USR tab state — user sub-tabs and per-user editing.
-	usrSubTab         int  // index into UserEntries; len(UserEntries) = "+ New User" tab
-	usrTabOffset      int  // first visible entry index in the sub-tab bar
-	usrEditingField   int  // which per-user field is being edited (usrOpt* constants)
-	usrEditingSSHList  bool   // SSH key list sub-mode is open for current user
-	usrSSHListCursor   int    // cursor in SSH list: 0..len(items)-1 = key; len(items) = "Add new key"
+	usrSubTab            int    // index into UserEntries; len(UserEntries) = "+ New User" tab
+	usrTabOffset         int    // first visible entry index in the sub-tab bar
+	usrEditingField      int    // which per-user field is being edited (usrOpt* constants)
+	usrEditingSSHList    bool   // SSH key list sub-mode is open for current user
+	usrSSHListCursor     int    // cursor in SSH list: 0..len(items)-1 = key; len(items) = "Add new key"
 	usrSSHEditingOrigKey string // non-empty when editing an existing key (holds the original key being replaced)
+
+	// NET tab state — firewall port list editing.
+	netPortListOpen      bool   // port rule sub-list is open
+	netPortListCursor    int    // cursor: 0..N-1=rules, N="Add port", N+1="Add presets"
+	netPortEditing       bool   // port edit submenu is open
+	netPortEditIdx       int    // index of rule being edited; -1 = new rule
+	netPortSubMenuCursor int    // cursor within port-edit submenu
+	netPortSubMenuType   string // "single" or "range"
+	netPortPresetsOpen   bool   // preset sublist is expanded inside port list
+	netPortPresetCursor  int    // cursor within preset sublist (0..len(netPresets))
+	netPortPresetSel     []bool // which presets are toggled (len = len(netPresets))
 
 	// Option selecting — active while a KindSelect picker is open.
 	selectingOption bool
@@ -399,106 +487,200 @@ func newPasswordInput(prompt string) textinput.Model {
 	return ti
 }
 
-// doApplyAll calls every checked option's ApplyFn in sequence and returns the
-// per-option results as an applyDoneMsg.
+// applyAction is a single deferred operation collected by doApplyAll.
+// fn returns zero or more results (user ops may produce several steps).
+type applyAction struct {
+	priority int
+	fn       func() []applyResult
+}
+
+// effectivePriority returns the priority to use, treating 0 as PrioConfigWrite.
+func effectivePriority(p int) int {
+	if p == 0 {
+		return PrioConfigWrite
+	}
+	return p
+}
+
+// doApplyAll collects every queued action across all tabs, sorts by priority,
+// and executes them in order, returning all results as an applyDoneMsg.
 func doApplyAll(pages []CategoryPage) tea.Cmd {
 	return func() tea.Msg {
-		var results []applyResult
+		var actions []applyAction
+
 		for _, pg := range pages {
-			for _, u := range pg.UserEntries {
-				if u.Existing && u.PendingDelete {
-					err := apply.DeleteUser(u.Name)
-					results = append(results, applyResult{label: "Delete user: " + u.Name, err: err})
-					continue
-				}
-				if !u.Existing {
-					err := apply.CreateUser(u.Name, u.Password)
-					results = append(results, applyResult{label: "Create user: " + u.Name, err: err})
-					if err != nil {
-						continue
-					}
-					if u.Sudo {
-						err = apply.AddSudo(u.Name)
-						results = append(results, applyResult{label: "Add sudo: " + u.Name, err: err})
-					}
-					for _, k := range u.SSHKeys {
-						err = apply.AddSSHKey(u.Name, k)
-						results = append(results, applyResult{label: "SSH key (" + apply.SSHKeyComment(k) + "): " + u.Name, err: err})
-					}
-				} else {
-					// Existing user: rename first, then password/sudo/SSH delta.
-					if u.OriginalName != "" && u.Name != u.OriginalName {
-						err := apply.RenameUser(u.OriginalName, u.Name)
-						results = append(results, applyResult{label: "Rename user: " + u.OriginalName + "→" + u.Name, err: err})
-						if err != nil {
-							continue
-						}
-					}
-					if u.NewPassword != "" {
-						err := apply.ChangePassword(u.Name, u.OldPassword, u.NewPassword)
-						results = append(results, applyResult{label: "Change password: " + u.Name, err: err})
-					}
-					if u.Sudo && !u.OriginalSudo {
-						err := apply.AddSudo(u.Name)
-						results = append(results, applyResult{label: "Add sudo: " + u.Name, err: err})
-					} else if !u.Sudo && u.OriginalSudo {
-						err := apply.RemoveSudo(u.Name)
-						results = append(results, applyResult{label: "Remove sudo: " + u.Name, err: err})
-					}
-					origSet := map[string]bool{}
-					for _, k := range u.OriginalSSHKeys {
-						origSet[k] = true
-					}
-					newSet := map[string]bool{}
-					for _, k := range u.SSHKeys {
-						newSet[k] = true
-					}
-					for _, k := range u.SSHKeys {
-						if !origSet[k] {
-							err := apply.AddSSHKey(u.Name, k)
-							results = append(results, applyResult{label: "SSH key add (" + apply.SSHKeyComment(k) + "): " + u.Name, err: err})
-						}
-					}
-					for _, k := range u.OriginalSSHKeys {
-						if !newSet[k] {
-							err := apply.RemoveSSHKey(u.Name, k)
-							results = append(results, applyResult{label: "SSH key remove (" + apply.SSHKeyComment(k) + "): " + u.Name, err: err})
-						}
-					}
-				}
+			// USR tab: user operations run as a sequential group at PrioConfigWrite.
+			// Internal ordering (delete → create → rename → password/sudo/SSH) is preserved.
+			if len(pg.UserEntries) > 0 {
+				entries := pg.UserEntries
+				actions = append(actions, applyAction{
+					priority: PrioConfigWrite,
+					fn: func() []applyResult {
+						return applyUserEntries(entries)
+					},
+				})
 			}
+
+			// Generic options sorted individually by their Priority field.
 			for _, opt := range pg.Options {
+				opt := opt
 				v := opt.Value
 				if v == "" {
 					v = opt.Default
 				}
+				p := effectivePriority(opt.Priority)
 				switch opt.Kind {
+				case KindPortList:
+					// Compute delta: add new rules, delete removed existing rules.
+					var toAdd []apply.PortRule
+					for _, r := range opt.PortRules {
+						if !r.Existing {
+							toAdd = append(toAdd, r)
+						}
+					}
+					current := portRuleKeySet(opt.PortRules)
+					var toRemove []apply.PortRule
+					for _, r := range opt.DetectedPortRules {
+						if !current[portRuleKey{r.From, r.To, r.Protocol}] {
+							toRemove = append(toRemove, r)
+						}
+					}
+					if len(toAdd) > 0 || len(toRemove) > 0 {
+						add, remove, lbl := toAdd, toRemove, opt.Label
+						actions = append(actions, applyAction{
+							priority: p,
+							fn: func() []applyResult {
+								var res []applyResult
+								if err := apply.ApplyFirewallRules(add); err != nil {
+									res = append(res, applyResult{label: lbl + " (add)", err: err})
+								}
+								if err := apply.DeleteFirewallRules(remove); err != nil {
+									res = append(res, applyResult{label: lbl + " (remove)", err: err})
+								}
+								if len(res) == 0 {
+									res = append(res, applyResult{label: lbl})
+								}
+								return res
+							},
+						})
+					}
 				case KindCycle:
-					// Only apply if user changed from detected state.
 					if opt.ApplyFn != nil && opt.Value != opt.Default {
-						err := opt.ApplyFn(v)
-						results = append(results, applyResult{label: opt.Label, err: err})
+						actions = append(actions, applyAction{
+							priority: p,
+							fn: func() []applyResult {
+								return []applyResult{{label: opt.Label, err: opt.ApplyFn(v)}}
+							},
+						})
 					}
 				default:
 					if opt.UndoFn != nil {
-						// Tracked toggle: apply/undo only on delta from detected state.
 						if opt.Checked && !opt.OriginalChecked && opt.ApplyFn != nil {
-							err := opt.ApplyFn(v)
-							results = append(results, applyResult{label: opt.Label, err: err})
+							actions = append(actions, applyAction{
+								priority: p,
+								fn: func() []applyResult {
+									return []applyResult{{label: opt.Label, err: opt.ApplyFn(v)}}
+								},
+							})
 						} else if !opt.Checked && opt.OriginalChecked {
-							err := opt.UndoFn(v)
-							results = append(results, applyResult{label: opt.Label + " (revert)", err: err})
+							actions = append(actions, applyAction{
+								priority: p,
+								fn: func() []applyResult {
+									return []applyResult{{label: opt.Label + " (revert)", err: opt.UndoFn(v)}}
+								},
+							})
 						}
 					} else if opt.Checked && opt.ApplyFn != nil {
-						// Untracked toggle (SYS tab etc.): always apply when checked.
-						err := opt.ApplyFn(v)
-						results = append(results, applyResult{label: opt.Label, err: err})
+						actions = append(actions, applyAction{
+							priority: p,
+							fn: func() []applyResult {
+								return []applyResult{{label: opt.Label, err: opt.ApplyFn(v)}}
+							},
+						})
 					}
 				}
 			}
 		}
+
+		sort.SliceStable(actions, func(i, j int) bool {
+			return actions[i].priority < actions[j].priority
+		})
+
+		var results []applyResult
+		for _, a := range actions {
+			results = append(results, a.fn()...)
+		}
 		return applyDoneMsg{results: results}
 	}
+}
+
+// applyUserEntries applies all queued user operations in the correct sequence.
+// Internal ordering is preserved: delete → create → existing-user delta.
+func applyUserEntries(entries []UserEntry) []applyResult {
+	var results []applyResult
+	for _, u := range entries {
+		if u.Existing && u.PendingDelete {
+			err := apply.DeleteUser(u.Name)
+			results = append(results, applyResult{label: "Delete user: " + u.Name, err: err})
+			continue
+		}
+		if !u.Existing {
+			err := apply.CreateUser(u.Name, u.Password)
+			results = append(results, applyResult{label: "Create user: " + u.Name, err: err})
+			if err != nil {
+				continue
+			}
+			if u.Sudo {
+				err = apply.AddSudo(u.Name)
+				results = append(results, applyResult{label: "Add sudo: " + u.Name, err: err})
+			}
+			for _, k := range u.SSHKeys {
+				err = apply.AddSSHKey(u.Name, k)
+				results = append(results, applyResult{label: "SSH key (" + apply.SSHKeyComment(k) + "): " + u.Name, err: err})
+			}
+			continue
+		}
+		// Existing user: rename first, then password/sudo/SSH delta.
+		if u.OriginalName != "" && u.Name != u.OriginalName {
+			err := apply.RenameUser(u.OriginalName, u.Name)
+			results = append(results, applyResult{label: "Rename user: " + u.OriginalName + "→" + u.Name, err: err})
+			if err != nil {
+				continue
+			}
+		}
+		if u.NewPassword != "" {
+			err := apply.ChangePassword(u.Name, u.OldPassword, u.NewPassword)
+			results = append(results, applyResult{label: "Change password: " + u.Name, err: err})
+		}
+		if u.Sudo && !u.OriginalSudo {
+			err := apply.AddSudo(u.Name)
+			results = append(results, applyResult{label: "Add sudo: " + u.Name, err: err})
+		} else if !u.Sudo && u.OriginalSudo {
+			err := apply.RemoveSudo(u.Name)
+			results = append(results, applyResult{label: "Remove sudo: " + u.Name, err: err})
+		}
+		origSet := map[string]bool{}
+		for _, k := range u.OriginalSSHKeys {
+			origSet[k] = true
+		}
+		newSet := map[string]bool{}
+		for _, k := range u.SSHKeys {
+			newSet[k] = true
+		}
+		for _, k := range u.SSHKeys {
+			if !origSet[k] {
+				err := apply.AddSSHKey(u.Name, k)
+				results = append(results, applyResult{label: "SSH key add (" + apply.SSHKeyComment(k) + "): " + u.Name, err: err})
+			}
+		}
+		for _, k := range u.OriginalSSHKeys {
+			if !newSet[k] {
+				err := apply.RemoveSSHKey(u.Name, k)
+				results = append(results, applyResult{label: "SSH key remove (" + apply.SSHKeyComment(k) + "): " + u.Name, err: err})
+			}
+		}
+	}
+	return results
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -652,6 +834,165 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case "?":
 					m.helpExpanded = !m.helpExpanded
 				}
+			}
+			return m, nil
+		}
+
+		// NET tab: preset sublist navigation (expanded inside port list).
+		if m.activeTab == tabIndexNET && m.netPortListOpen && m.netPortPresetsOpen {
+			confirmIdx := len(netPresets)
+			switch msg.String() {
+			case "up", "k":
+				if m.netPortPresetCursor > 0 {
+					m.netPortPresetCursor--
+				}
+			case "down", "j":
+				if m.netPortPresetCursor < confirmIdx {
+					m.netPortPresetCursor++
+				}
+			case " ", "enter":
+				if m.netPortPresetCursor < confirmIdx {
+					m.netPortPresetSel[m.netPortPresetCursor] = !m.netPortPresetSel[m.netPortPresetCursor]
+				} else {
+					// Confirm: add selected preset rules (skip duplicates).
+					opt := &m.categoryPages[tabIndexNET].Options[0]
+					current := portRuleKeySet(opt.PortRules)
+					for i, p := range netPresets {
+						if !m.netPortPresetSel[i] {
+							continue
+						}
+						for _, r := range p.Rules {
+							k := portRuleKey{r.From, r.To, r.Protocol}
+							if !current[k] {
+								opt.PortRules = append(opt.PortRules, r)
+								current[k] = true
+							}
+						}
+					}
+					m.netPortPresetsOpen = false
+					m.netPortPresetSel = nil
+					m.netPortListCursor = len(opt.PortRules) - 1
+					if m.netPortListCursor < 0 {
+						m.netPortListCursor = 0
+					}
+				}
+			case "esc":
+				m.netPortPresetsOpen = false
+				m.netPortPresetSel = nil
+			case "?":
+				m.helpExpanded = !m.helpExpanded
+			}
+			return m, nil
+		}
+
+		// NET tab: port list navigation (open, not in submenu or preset sublist).
+		if m.activeTab == tabIndexNET && m.netPortListOpen && !m.netPortEditing {
+			opt := &m.categoryPages[tabIndexNET].Options[0]
+			// cursor 0..N-1 = rules; N = "Add port"; N+1 = "Add presets"
+			addPortIdx := len(opt.PortRules)
+			addPresetsIdx := len(opt.PortRules) + 1
+			switch msg.String() {
+			case "up", "k":
+				if m.netPortListCursor > 0 {
+					m.netPortListCursor--
+				}
+			case "down", "j":
+				if m.netPortListCursor < addPresetsIdx {
+					m.netPortListCursor++
+				}
+			case "r":
+				if m.netPortListCursor < addPortIdx {
+					opt.PortRules = append(opt.PortRules[:m.netPortListCursor], opt.PortRules[m.netPortListCursor+1:]...)
+					if m.netPortListCursor > len(opt.PortRules) {
+						m.netPortListCursor = len(opt.PortRules)
+					}
+				}
+			case "e", "enter", " ":
+				switch m.netPortListCursor {
+				case addPortIdx:
+					m = m.startPortEdit(-1)
+				case addPresetsIdx:
+					m.netPortPresetsOpen = true
+					m.netPortPresetCursor = 0
+					m.netPortPresetSel = make([]bool, len(netPresets))
+				default:
+					m = m.startPortEdit(m.netPortListCursor)
+				}
+			case "esc":
+				m.netPortListOpen = false
+				m.inputError = ""
+			case "?":
+				m.helpExpanded = !m.helpExpanded
+			}
+			return m, nil
+		}
+
+		// NET tab: port edit submenu navigation (submenu open, no text field focused).
+		if m.activeTab == tabIndexNET && m.netPortEditing && !m.editingOption {
+			switch msg.String() {
+			case "up", "k":
+				if m.netPortSubMenuCursor > 0 {
+					m.netPortSubMenuCursor--
+				}
+			case "down", "j":
+				if m.netPortSubMenuCursor < m.portSubMenuConfirmIdx() {
+					m.netPortSubMenuCursor++
+				}
+			case "enter", " ":
+				protoIdx := m.portSubMenuProtoIdx()
+				confirmIdx := m.portSubMenuConfirmIdx()
+				switch m.netPortSubMenuCursor {
+				case 0: // Type cycle
+					if m.netPortSubMenuType == "single" {
+						m.netPortSubMenuType = "range"
+					} else {
+						m.netPortSubMenuType = "single"
+						m.subValues[1] = ""
+						if m.netPortSubMenuCursor > m.portSubMenuConfirmIdx() {
+							m.netPortSubMenuCursor = m.portSubMenuConfirmIdx()
+						}
+					}
+				case 1: // Port/From text field
+					ti := textinput.New()
+					ti.Prompt = ""
+					ti.Width = 6
+					ti.SetValue(m.subValues[0])
+					ti.Focus()
+					m.textInput = ti
+					m.editingOption = true
+					m.inputError = ""
+				case 2: // To text field (range mode only)
+					if m.netPortSubMenuType == "range" {
+						ti := textinput.New()
+						ti.Prompt = ""
+						ti.Width = 6
+						ti.SetValue(m.subValues[1])
+						ti.Focus()
+						m.textInput = ti
+						m.editingOption = true
+						m.inputError = ""
+					}
+				default:
+					if m.netPortSubMenuCursor == protoIdx {
+						protos := []string{"tcp", "udp", "both"}
+						cur := m.subValues[2]
+						if cur == "" {
+							cur = "tcp"
+						}
+						for i, p := range protos {
+							if p == cur {
+								m.subValues[2] = protos[(i+1)%len(protos)]
+								break
+							}
+						}
+					} else if m.netPortSubMenuCursor == confirmIdx {
+						m = m.confirmPortEdit()
+					}
+				}
+			case "esc":
+				m = m.cancelPortEdit()
+			case "?":
+				m.helpExpanded = !m.helpExpanded
 			}
 			return m, nil
 		}
@@ -824,6 +1165,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							// stay in usrEditingSSHList mode
 						}
 					}
+				} else if m.activeTab == tabIndexNET && m.netPortEditing {
+					// NET tab: validate and save text field in port-edit submenu.
+					val := m.textInput.Value()
+					switch m.netPortSubMenuCursor {
+					case 1: // Port/From
+						if err := apply.ValidateNetPort(val); err != nil {
+							m.inputError = err.Error()
+							return m, nil
+						}
+						m.subValues[0] = val
+						m.editingOption = false
+						m.inputError = ""
+					case 2: // To (range mode)
+						if val != "" {
+							if err := apply.ValidatePortRange(m.subValues[0], val); err != nil {
+								m.inputError = err.Error()
+								return m, nil
+							}
+						}
+						m.subValues[1] = val
+						m.editingOption = false
+						m.inputError = ""
+					}
 				} else {
 					absIdx := m.tabSubPage*maxOptionsPerPage + m.categoryPageCursor
 					opt := &m.categoryPages[m.activeTab].Options[absIdx]
@@ -840,10 +1204,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case "esc":
 				m.editingOption = false
-				m.inputSubStep = 0
-				m.subValues = [3]string{}
 				m.inputError = ""
 				m.usrSSHEditingOrigKey = ""
+				// For port submenu, esc just unfocuses the field; keep subValues intact.
+				if !m.netPortEditing {
+					m.inputSubStep = 0
+					m.subValues = [3]string{}
+				}
 				// If we were adding/editing a key inside the SSH list, stay in list mode.
 				// (usrEditingSSHList remains true; the list handler takes over next key.)
 			default:
@@ -943,6 +1310,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case pageQuickSetup:
 				m.page = pageEnvironment
 			case pageReview:
+				if m.netPortListOpen {
+					m.netPortListOpen = false
+					m.netPortEditing = false
+					m.inputError = ""
+					return m, nil
+				}
 				m.page = pageQuickSetup
 				m.activeTab = 0
 				m.tabSubPage = 0
@@ -963,6 +1336,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.editingOption = false
 					m.selectingOption = false
 					m.usrEditingSSHList = false
+					m.netPortListOpen = false
+					m.netPortEditing = false
 					m.inputError = ""
 					m.categoryPages = syncOnTabEnter(m.activeTab, m.categoryPages)
 				}
@@ -983,6 +1358,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.editingOption = false
 					m.selectingOption = false
 					m.usrEditingSSHList = false
+					m.netPortListOpen = false
+					m.netPortEditing = false
 					m.inputError = ""
 					m.categoryPages = syncOnTabEnter(m.activeTab, m.categoryPages)
 				}
@@ -1198,6 +1575,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							}
 							m.selectViewport = max(0, m.selectCursor-visibleItems/2)
 							m.selectingOption = true
+						case KindPortList:
+							// Enter/space: open the port list at cursor 0 (preset row).
+							m.netPortListOpen = true
+							m.netPortListCursor = 0
+							m.inputError = ""
 						case KindCycle:
 							items := opt.SelectItems
 							if len(items) > 0 {
@@ -2060,6 +2442,85 @@ func usrTabSlidingWindow(labels []string, activeIdx, offset, maxWidth int, activ
 	return strings.Join(parts, sep)
 }
 
+// viewPortSubMenu renders the port add/edit submenu rows into the given indent.
+func (m Model) viewPortSubMenu(indent string) string {
+	var b strings.Builder
+	proto := m.subValues[2]
+	if proto == "" {
+		proto = "tcp"
+	}
+	isRange := m.netPortSubMenuType == "range"
+	protoIdx := m.portSubMenuProtoIdx()
+	confirmIdx := m.portSubMenuConfirmIdx()
+
+	row := func(rowIdx int, label, val string) {
+		cur := noCursorStr
+		s := normalStyle
+		if m.netPortSubMenuCursor == rowIdx {
+			cur = cursorStr
+			s = selectedStyle
+		}
+		b.WriteString(indent + cur + s.Render(label+val) + "\n")
+	}
+
+	// Row 0: Type cycle
+	row(0, "Type: ", m.netPortSubMenuType)
+
+	// Row 1: Port/From text field
+	fromLabel := "Port:  "
+	if isRange {
+		fromLabel = "From:  "
+	}
+	if m.netPortSubMenuCursor == 1 && m.editingOption {
+		b.WriteString(indent + cursorStr + selectedStyle.Render(fromLabel) + m.textInput.View() + "\n")
+		if m.inputError != "" {
+			b.WriteString(indent + noCursorStr + errorStyle.Render("✗ "+m.inputError) + "\n")
+		}
+	} else {
+		v := m.subValues[0]
+		if v == "" {
+			v = mutedStyle.Render("1 - 65535")
+		}
+		cur := noCursorStr
+		s := normalStyle
+		if m.netPortSubMenuCursor == 1 {
+			cur = cursorStr
+			s = selectedStyle
+		}
+		b.WriteString(indent + cur + s.Render(fromLabel+v) + "\n")
+	}
+
+	// Row 2: To text field (range mode only)
+	if isRange {
+		if m.netPortSubMenuCursor == 2 && m.editingOption {
+			b.WriteString(indent + cursorStr + selectedStyle.Render("To:    ") + m.textInput.View() + "\n")
+			if m.inputError != "" {
+				b.WriteString(indent + noCursorStr + errorStyle.Render("✗ "+m.inputError) + "\n")
+			}
+		} else {
+			v := m.subValues[1]
+			if v == "" {
+				v = mutedStyle.Render("1 - 65535")
+			}
+			cur := noCursorStr
+			s := normalStyle
+			if m.netPortSubMenuCursor == 2 {
+				cur = cursorStr
+				s = selectedStyle
+			}
+			b.WriteString(indent + cur + s.Render("To:    "+v) + "\n")
+		}
+	}
+
+	// Proto row
+	row(protoIdx, "Proto: ", proto+"\n")
+
+	// Confirm row
+	row(confirmIdx, "Confirm", "")
+
+	return b.String()
+}
+
 // viewCategoryReviewBody returns the options list and optional confirm button
 // that sit below the full-width separator. maxWidth is the available text
 // width for word-wrap; callers should pass bottomContentW when the body
@@ -2143,6 +2604,90 @@ func (m Model) viewCategoryReviewBody(maxWidth int) string {
 					}
 				}
 			}
+		case KindPortList:
+			listOpen := isCursor && m.netPortListOpen
+			marker := kindListCollapsed
+			if listOpen {
+				marker = kindListExpanded
+			}
+			// Header row: label + rule count.
+			count := len(opt.PortRules)
+			countSuffix := ""
+			if count > 0 {
+				countSuffix = fmt.Sprintf(" (%d)", count)
+			}
+			b.WriteString(renderOptionLine(cursor, marker, opt.Label, itemStyle, colW))
+			b.WriteString(valStyle.Render(countSuffix))
+			if dirty {
+				b.WriteString(queuedStyle.Render(" ·"))
+			}
+			b.WriteString("\n")
+
+			if listOpen {
+				indent := strings.Repeat(" ", lipgloss.Width(cursor+marker))
+
+				if m.netPortEditing {
+					b.WriteString(m.viewPortSubMenu(indent))
+				} else {
+					// Rule rows (cursor 0..N-1).
+					for ri, rule := range opt.PortRules {
+						liCur := noCursorStr
+						liStyle := normalStyle
+						if m.netPortListCursor == ri {
+							liCur = cursorStr
+							liStyle = selectedStyle
+						}
+						label := rule.String()
+						if rule.Existing {
+							label += mutedStyle.Render(" (active)")
+						}
+						b.WriteString(indent + liCur + liStyle.Render(label) + "\n")
+					}
+					// "Add port" row (cursor N).
+					addPortIdx := len(opt.PortRules)
+					addPortCur := noCursorStr
+					addPortStyle := mutedStyle
+					if m.netPortListCursor == addPortIdx {
+						addPortCur = cursorStr
+						addPortStyle = selectedStyle
+					}
+					b.WriteString(indent + addPortCur + addPortStyle.Render("+ Add port") + "\n")
+					// "Add presets" row (cursor N+1) — expands inline when open.
+					addPresetsIdx := addPortIdx + 1
+					addPresetsCur := noCursorStr
+					addPresetsStyle := mutedStyle
+					if m.netPortListCursor == addPresetsIdx {
+						addPresetsCur = cursorStr
+						addPresetsStyle = selectedStyle
+					}
+					b.WriteString(indent + addPresetsCur + addPresetsStyle.Render("+ Add presets") + "\n")
+					if m.netPortPresetsOpen {
+						presetIndent := indent + "  "
+						for pi, p := range netPresets {
+							pCur := noCursorStr
+							pStyle := normalStyle
+							if m.netPortPresetCursor == pi {
+								pCur = cursorStr
+								pStyle = selectedStyle
+							}
+							check := radioOff
+							if m.netPortPresetSel[pi] {
+								check = radioOn
+							}
+							b.WriteString(presetIndent + pCur + pStyle.Render(check+p.Label) + "\n")
+						}
+						confirmIdx := len(netPresets)
+						confCur := noCursorStr
+						confStyle := mutedStyle
+						if m.netPortPresetCursor == confirmIdx {
+							confCur = cursorStr
+							confStyle = selectedStyle
+						}
+						b.WriteString(presetIndent + confCur + confStyle.Render("[Confirm]") + "\n")
+					}
+				}
+			}
+
 		case KindCycle:
 			b.WriteString(renderOptionLine(cursor, kindCycleMarker, opt.Label+": ", itemStyle, colW))
 			b.WriteString(valStyle.Render(opt.Value) + "\n")
@@ -2351,6 +2896,21 @@ func isOptionQueued(opt CategoryOption) bool {
 		return opt.Value != opt.Default
 	case KindTextInput, KindSelect:
 		return opt.Value != "" && opt.Value != opt.Default
+	case KindPortList:
+		// Queued if any new (non-existing) rules were added.
+		for _, r := range opt.PortRules {
+			if !r.Existing {
+				return true
+			}
+		}
+		// Or if any detected rule was removed.
+		current := portRuleKeySet(opt.PortRules)
+		for _, r := range opt.DetectedPortRules {
+			if !current[portRuleKey{r.From, r.To, r.Protocol}] {
+				return true
+			}
+		}
+		return false
 	default: // KindToggle
 		if opt.UndoFn != nil {
 			return opt.Checked != opt.OriginalChecked
@@ -2370,6 +2930,10 @@ func checkedCount(page CategoryPage) int {
 	}
 	for _, opt := range page.Options {
 		switch opt.Kind {
+		case KindPortList:
+			if len(opt.PortRules) > 0 {
+				n++
+			}
 		case KindCycle:
 			if opt.ApplyFn != nil && opt.Value != opt.Default {
 				n++
@@ -2414,6 +2978,8 @@ func syncOnTabEnter(tabIdx int, pages []CategoryPage) []CategoryPage {
 		return syncUsrTab(pages)
 	case tabIndexSEC:
 		return syncSecTab(pages)
+	case tabIndexNET:
+		return syncNetTab(pages)
 	case tabIndexPKG:
 		return syncPkgTab(pages)
 	case tabIndexRUN:
@@ -2505,7 +3071,111 @@ func resetOption(opt *CategoryOption) {
 	case KindTextInput:
 		opt.Value = ""
 		opt.Checked = false
+	case KindPortList:
+		// Reset to the state detected from the live system.
+		opt.PortRules = make([]apply.PortRule, len(opt.DetectedPortRules))
+		copy(opt.PortRules, opt.DetectedPortRules)
 	}
+}
+
+// portSubMenuProtoIdx returns the submenu row index of the protocol cycle row.
+func (m Model) portSubMenuProtoIdx() int {
+	if m.netPortSubMenuType == "range" {
+		return 3
+	}
+	return 2
+}
+
+// portSubMenuConfirmIdx returns the submenu row index of the Confirm row.
+func (m Model) portSubMenuConfirmIdx() int {
+	if m.netPortSubMenuType == "range" {
+		return 4
+	}
+	return 3
+}
+
+// startPortEdit opens the port-edit submenu.
+// idx == -1 means adding a new rule; idx >= 0 means editing the rule at that index.
+func (m Model) startPortEdit(idx int) Model {
+	opt := &m.categoryPages[tabIndexNET].Options[0]
+	m.netPortEditing = true
+	m.netPortEditIdx = idx
+	m.netPortSubMenuCursor = 1 // start on Port/From field
+	m.netPortSubMenuType = "single"
+	m.subValues = [3]string{"", "", "tcp"}
+	if idx >= 0 && idx < len(opt.PortRules) {
+		r := opt.PortRules[idx]
+		m.subValues[0] = r.From
+		m.subValues[1] = r.To
+		m.subValues[2] = r.Protocol
+		if r.To != "" && r.To != r.From {
+			m.netPortSubMenuType = "range"
+		}
+	}
+	m.editingOption = false
+	m.inputError = ""
+	return m
+}
+
+// confirmPortEdit saves the completed port rule and clears edit state.
+func (m Model) confirmPortEdit() Model {
+	opt := &m.categoryPages[tabIndexNET].Options[0]
+	rule := apply.PortRule{
+		From:     m.subValues[0],
+		To:       m.subValues[1],
+		Protocol: m.subValues[2],
+	}
+	if m.netPortEditIdx >= 0 && m.netPortEditIdx < len(opt.PortRules) {
+		opt.PortRules[m.netPortEditIdx] = rule
+		m.netPortListCursor = m.netPortEditIdx
+	} else {
+		opt.PortRules = append(opt.PortRules, rule)
+		m.netPortListCursor = len(opt.PortRules) - 1
+	}
+	m.netPortEditing = false
+	m.editingOption = false
+	m.inputSubStep = 0
+	m.subValues = [3]string{}
+	m.inputError = ""
+	return m
+}
+
+// cancelPortEdit aborts the port-edit submenu and returns to the port list.
+func (m Model) cancelPortEdit() Model {
+	m.netPortEditing = false
+	m.editingOption = false
+	m.netPortSubMenuCursor = 0
+	m.netPortSubMenuType = ""
+	m.inputSubStep = 0
+	m.subValues = [3]string{}
+	m.inputError = ""
+	return m
+}
+
+
+// syncNetTab detects current system state for NET tab options (run once, guarded by Synced).
+func syncNetTab(pages []CategoryPage) []CategoryPage {
+	if pages[tabIndexNET].Synced {
+		return pages
+	}
+	opts := pages[tabIndexNET].Options
+	for i := range opts {
+		switch opts[i].Label {
+		case "FW: Open ports":
+			detected := apply.DetectOpenPorts()
+			snapshot := make([]apply.PortRule, len(detected))
+			copy(snapshot, detected)
+			opts[i].PortRules = detected
+			opts[i].DetectedPortRules = snapshot
+		case "Enable fail2ban":
+			active := apply.DetectFail2banActive()
+			opts[i].Checked = active
+			opts[i].OriginalChecked = active
+		}
+	}
+	pages[tabIndexNET].Options = opts
+	pages[tabIndexNET].Synced = true
+	return pages
 }
 
 // syncPkgTab auto-toggles packages required by other tabs' checked options.
