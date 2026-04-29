@@ -1,6 +1,8 @@
 # boltx
 
+![Logo](assets/gifs/splashLogo.gif)
 ![boltx](assets/gifs/boltx.gif)
+![programPreview](assets/gifs/programPreview.gif)
 
 A terminal tool for setting up Linux systems. Whether you're spinning up a VPS or a dev machine, boltx walks you through the usual setup steps — hostname, users, security, packages — and applies them all at once when you're ready.
 
