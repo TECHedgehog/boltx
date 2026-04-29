@@ -47,7 +47,8 @@ const maxOptionsPerPage = 8
 type page int
 
 const (
-	pageWelcome page = iota
+	pageSplash page = iota
+	pageWelcome
 	pageEnvironment
 	pageQuickSetup
 	pageReview
@@ -417,6 +418,16 @@ type Model struct {
 	ringBell   bool // cleared after one render cycle
 	visualBell bool // flashes blocked row for 150ms
 
+	// Splash animation state
+	splashGen        int
+	splashFrame      int
+	splashPhase      int
+	splashHoldCnt    int
+	splashColorIdx   int
+	splashColorTick  int
+	splashScatter    [][]int
+	splashMaxReveal  int
+
 	// Layout — recomputed on every terminal resize and after detection completes.
 	rightContentW int // measured width of the rendered info table (set after detection)
 	rightContentH int // measured height of the rendered info table (set after detection)
@@ -458,16 +469,18 @@ func NewModel() Model {
 	h.Styles.FullDesc = lipgloss.NewStyle().Foreground(Themes[0].Muted)
 	h.Styles.FullSeparator = lipgloss.NewStyle().Foreground(Themes[0].Muted)
 
-	return Model{
+	m := Model{
 		detecting: true,
 		spinner:   s,
 		help:      h,
 	}
+	m.initSplash()
+	return m
 }
 
 // Init fires environment and OS detection as soon as the program starts.
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(doDetect, m.spinner.Tick)
+	return tea.Batch(doDetect, m.spinner.Tick, splashTickCmd(m.splashGen))
 }
 
 // doDetect runs detection in the background and returns the result as a message.
@@ -691,6 +704,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m = computeLayout(m)
 
+	case splashTickMsg:
+		if msg.gen != m.splashGen {
+			return m, nil
+		}
+		if done := m.advanceSplash(); done {
+			m.page = pageWelcome
+			return m, nil
+		}
+		return m, splashTickCmd(m.splashGen)
+
 	case spinner.TickMsg:
 		if m.detecting || m.applyState == applyRunning {
 			var cmd tea.Cmd
@@ -725,6 +748,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m = computeLayout(m)
 
 	case tea.KeyMsg:
+		// Any key press skips the splash.
+		if m.page == pageSplash {
+			m.page = pageWelcome
+			m.themeIdx = 0
+			applyTheme(Themes[0])
+			m.splashGen++ // stop the running splash tick stream
+			return m, nil
+		}
 		// While a KindSelect picker is open, intercept navigation keys.
 		if m.selectingOption {
 			switch msg.String() {
@@ -1654,6 +1685,9 @@ func computeLayout(m Model) Model {
 // would sit beside blank right-column space instead flow below the table,
 // spanning the full inner width of the box so no space is wasted.
 func (m Model) View() string {
+	if m.page == pageSplash {
+		return m.viewSplashPage()
+	}
 	leftMain := m.viewLeft()
 
 	leftW := m.leftColW
