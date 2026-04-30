@@ -3095,9 +3095,10 @@ func syncSecTab(pages []CategoryPage) []CategoryPage {
 }
 
 // resetOption reverts a single CategoryOption to its detected/default state.
-// KindCycle: restores Value to Default (detected sshd value).
-// KindTextInput: clears Value and unchecks (opt-in option deselected).
-// Others: no-op (Value is not meaningful).
+// KindCycle: restores Value to Default.
+// KindTextInput: clears Value and unchecks.
+// KindToggle: restores Checked to OriginalChecked (detected state).
+// KindPortList: restores PortRules to DetectedPortRules.
 func resetOption(opt *CategoryOption) {
 	switch opt.Kind {
 	case KindCycle:
@@ -3105,6 +3106,8 @@ func resetOption(opt *CategoryOption) {
 	case KindTextInput:
 		opt.Value = ""
 		opt.Checked = false
+	case KindToggle:
+		opt.Checked = opt.OriginalChecked
 	case KindPortList:
 		// Reset to the state detected from the live system.
 		opt.PortRules = make([]apply.PortRule, len(opt.DetectedPortRules))
