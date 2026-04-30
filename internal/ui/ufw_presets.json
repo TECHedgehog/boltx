@@ -1,0 +1,21 @@
+[
+  {
+    "label": "Web (80, 443)",
+    "rules": [
+      {"from": "80", "protocol": "tcp"},
+      {"from": "443", "protocol": "tcp"}
+    ]
+  },
+  {
+    "label": "SSH (22)",
+    "rules": [
+      {"from": "22", "protocol": "tcp"}
+    ]
+  },
+  {
+    "label": "Minecraft (25565)",
+    "rules": [
+      {"from": "25565", "protocol": "tcp"}
+    ]
+  }
+]

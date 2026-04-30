@@ -8,10 +8,10 @@ import (
 
 // PortRule represents a single firewall rule.
 type PortRule struct {
-	From     string // e.g. "22" or "25565"
-	To       string // range end; empty = single port
-	Protocol string // "tcp" / "udp" / "both"
-	Existing bool   // true when detected from the live system at startup
+	From     string `json:"from"`     // e.g. "22" or "25565"
+	To       string `json:"to"`       // range end; empty = single port
+	Protocol string `json:"protocol"` // "tcp" / "udp" / "both"
+	Existing bool   `json:"-"`        // true when detected from the live system at startup
 }
 
 // String returns a human-readable label, e.g. "22/tcp" or "25565 to 25566/udp".

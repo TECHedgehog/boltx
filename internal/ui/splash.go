@@ -184,9 +184,9 @@ func (m *Model) advanceSplash() (done bool) {
 // viewSplashPage renders the full-screen splash: centered box containing the
 // animated Kban logo. Called instead of the normal View layout when page == pageSplash.
 func (m Model) viewSplashPage() string {
-	accent := Themes[m.themeIdx].Accent
-	ss := lipgloss.NewStyle().Foreground(accent).Bold(true)
-	ns := lipgloss.NewStyle().Foreground(splashDimColor(accent))
+	theme := Themes[m.themeIdx]
+	ss := lipgloss.NewStyle().Foreground(theme.Accent).Bold(true)
+	ns := lipgloss.NewStyle().Foreground(theme.Dim)
 
 	// Render each logo line
 	lines := make([]string, splashLogoH)
@@ -262,16 +262,3 @@ func splashNoise() rune {
 	return splashNoiseChars[rand.Intn(len(splashNoiseChars))]
 }
 
-// splashDimColor returns a darker shade of the given accent color for noise chars.
-func splashDimColor(accent lipgloss.Color) lipgloss.Color {
-	switch accent {
-	case "#7C3AED":
-		return lipgloss.Color("#3B1A7A")
-	case "#0D9488":
-		return lipgloss.Color("#134E4A")
-	case "#D97706":
-		return lipgloss.Color("#78350F")
-	default:
-		return lipgloss.Color("#374151")
-	}
-}

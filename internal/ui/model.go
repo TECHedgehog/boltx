@@ -1,6 +1,8 @@
 package ui
 
 import (
+	_ "embed"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"runtime"
@@ -63,7 +65,7 @@ const (
 	KindTextInput                   // single-line text, backed by bubbles/textinput
 	KindSelect                      // pick from a list; items stored in SelectItems
 	KindCycle                       // cycles through SelectItems on space/enter; Value holds current
-	KindPortList // expandable port rule list (NET tab firewall)
+	KindPortList                    // expandable port rule list (NET tab firewall)
 )
 
 // portRuleKey identifies a firewall rule by its values, ignoring the Existing flag.
@@ -79,22 +81,64 @@ func portRuleKeySet(rules []apply.PortRule) map[portRuleKey]bool {
 
 // netPreset describes a named group of port rules available in "Add presets".
 type netPreset struct {
-	Label string
-	Rules []apply.PortRule
+	Label string       `json:"label"`
+	Rules []apply.PortRule `json:"rules"`
 }
 
-var netPresets = []netPreset{
-	{"Web (80, 443)", []apply.PortRule{
-		{From: "80", Protocol: "tcp"},
-		{From: "443", Protocol: "tcp"},
-	}},
-	{"Minecraft (25565)", []apply.PortRule{
-		{From: "25565", Protocol: "tcp"},
-		{From: "25565", Protocol: "udp"},
-	}},
-	{"SSH (22)", []apply.PortRule{
-		{From: "22", Protocol: "tcp"},
-	}},
+//go:embed ufw_presets.json
+var ufwPresetsJSON []byte
+
+var netPresets = func() []netPreset {
+	var presets []netPreset
+	if err := json.Unmarshal(ufwPresetsJSON, &presets); err != nil {
+		panic("ufw_presets.json: " + err.Error())
+	}
+	return presets
+}()
+
+// presetProtoLabel returns a short protocol suffix for display ("tcp", "udp", "tcp/udp").
+func presetProtoLabel(p netPreset) string {
+	hasTCP, hasUDP := false, false
+	for _, r := range p.Rules {
+		switch r.Protocol {
+		case "tcp":
+			hasTCP = true
+		case "udp":
+			hasUDP = true
+		case "both":
+			hasTCP, hasUDP = true, true
+		}
+	}
+	switch {
+	case hasTCP && hasUDP:
+		return "tcp/udp"
+	case hasUDP:
+		return "udp"
+	default:
+		return "tcp"
+	}
+}
+
+// presetFullyCovered returns true when every rule of p is already present in rules.
+func presetFullyCovered(p netPreset, rules []apply.PortRule) bool {
+	current := portRuleKeySet(rules)
+	for _, r := range p.Rules {
+		if !current[portRuleKey{r.From, r.To, r.Protocol}] {
+			return false
+		}
+	}
+	return true
+}
+
+// visiblePresetIndices returns indices into netPresets that are not fully covered by opt.PortRules.
+func visiblePresetIndices(opt *CategoryOption) []int {
+	var out []int
+	for i, p := range netPresets {
+		if !presetFullyCovered(p, opt.PortRules) {
+			out = append(out, i)
+		}
+	}
+	return out
 }
 
 // UserEntry holds per-user configuration for the USR tab.
@@ -133,21 +177,21 @@ const (
 
 // CategoryOption is a single setting within a category page.
 type CategoryOption struct {
-	Label            string
-	Kind             OptionKind
-	Checked          bool               // will this option be applied?
-	Default          string             // detected current value (shown as placeholder)
-	Value            string             // user-supplied value; empty → use Default on apply
-	ApplyFn          func(string) error // deferred to GO! tab; called when Checked=true
-	UndoFn           func(string) error // deferred to GO! tab; called when Checked=false (reverts the option)
-	OriginalChecked  bool               // Checked state at sync time; delta apply skips if Checked==OriginalChecked
-	NeedsRoot        bool               // if true, hidden when not running as root
-	SelectItems      []string           // valid choices for KindSelect; populated at build time
-	ClearOnEdit      bool               // KindTextInput: open with empty field (placeholder = Default) instead of pre-filling Value
-	ValidateFn       func(string) error // optional: called on confirm; blocks save if non-nil error
-	Priority         int                // GO! execution order; lower = earlier; 0 treated as PrioConfigWrite
-	PortRules         []apply.PortRule // KindPortList: current list of port rules (existing + new)
-	DetectedPortRules []apply.PortRule // KindPortList: rules detected from live system at sync time
+	Label             string
+	Kind              OptionKind
+	Checked           bool               // will this option be applied?
+	Default           string             // detected current value (shown as placeholder)
+	Value             string             // user-supplied value; empty → use Default on apply
+	ApplyFn           func(string) error // deferred to GO! tab; called when Checked=true
+	UndoFn            func(string) error // deferred to GO! tab; called when Checked=false (reverts the option)
+	OriginalChecked   bool               // Checked state at sync time; delta apply skips if Checked==OriginalChecked
+	NeedsRoot         bool               // if true, hidden when not running as root
+	SelectItems       []string           // valid choices for KindSelect; populated at build time
+	ClearOnEdit       bool               // KindTextInput: open with empty field (placeholder = Default) instead of pre-filling Value
+	ValidateFn        func(string) error // optional: called on confirm; blocks save if non-nil error
+	Priority          int                // GO! execution order; lower = earlier; 0 treated as PrioConfigWrite
+	PortRules         []apply.PortRule   // KindPortList: current list of port rules (existing + new)
+	DetectedPortRules []apply.PortRule   // KindPortList: rules detected from live system at sync time
 }
 
 // CategoryPage groups related options under a category name.
@@ -267,7 +311,7 @@ func buildCategoryPages(uc detect.UseCase, osInfo detect.OSInfo) []CategoryPage 
 			Name: "NET",
 			Options: filter([]CategoryOption{
 				{
-					Label:     "FW: Open ports",
+					Label:     "Firewall: Open ports",
 					Kind:      KindPortList,
 					NeedsRoot: true,
 					Priority:  PrioFirewallRule,
@@ -419,14 +463,14 @@ type Model struct {
 	visualBell bool // flashes blocked row for 150ms
 
 	// Splash animation state
-	splashGen        int
-	splashFrame      int
-	splashPhase      int
-	splashHoldCnt    int
-	splashColorIdx   int
-	splashColorTick  int
-	splashScatter    [][]int
-	splashMaxReveal  int
+	splashGen       int
+	splashFrame     int
+	splashPhase     int
+	splashHoldCnt   int
+	splashColorIdx  int
+	splashColorTick int
+	splashScatter   [][]int
+	splashMaxReveal int
 
 	// Layout — recomputed on every terminal resize and after detection completes.
 	rightContentW int // measured width of the rendered info table (set after detection)
@@ -871,7 +915,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// NET tab: preset sublist navigation (expanded inside port list).
 		if m.activeTab == tabIndexNET && m.netPortListOpen && m.netPortPresetsOpen {
-			confirmIdx := len(netPresets)
+			opt := &m.categoryPages[tabIndexNET].Options[0]
+			visible := visiblePresetIndices(opt)
+			confirmIdx := len(visible)
 			switch msg.String() {
 			case "up", "k":
 				if m.netPortPresetCursor > 0 {
@@ -883,16 +929,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case " ", "enter":
 				if m.netPortPresetCursor < confirmIdx {
-					m.netPortPresetSel[m.netPortPresetCursor] = !m.netPortPresetSel[m.netPortPresetCursor]
+					origIdx := visible[m.netPortPresetCursor]
+					m.netPortPresetSel[origIdx] = !m.netPortPresetSel[origIdx]
 				} else {
-					// Confirm: add selected preset rules (skip duplicates).
-					opt := &m.categoryPages[tabIndexNET].Options[0]
+					// Confirm: add selected preset rules (skip already-present ones).
 					current := portRuleKeySet(opt.PortRules)
-					for i, p := range netPresets {
-						if !m.netPortPresetSel[i] {
+					for _, origIdx := range visible {
+						if !m.netPortPresetSel[origIdx] {
 							continue
 						}
-						for _, r := range p.Rules {
+						for _, r := range netPresets[origIdx].Rules {
 							k := portRuleKey{r.From, r.To, r.Protocol}
 							if !current[k] {
 								opt.PortRules = append(opt.PortRules, r)
@@ -1017,7 +1063,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							}
 						}
 					} else if m.netPortSubMenuCursor == confirmIdx {
-						m = m.confirmPortEdit()
+						var cmd tea.Cmd
+						m, cmd = m.confirmPortEdit()
+						return m, cmd
 					}
 				}
 			case "esc":
@@ -1578,7 +1626,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 								placeholder = opt.Value
 							}
 							ti.Placeholder = placeholder
-							ti.Width = 40
+							ti.Width = optionInputWidth
 							if opt.ClearOnEdit {
 								ti.SetValue("")
 							} else {
@@ -1607,6 +1655,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.selectViewport = max(0, m.selectCursor-visibleItems/2)
 							m.selectingOption = true
 						case KindPortList:
+							if !m.ufwChecked() {
+								break
+							}
 							// Enter/space: open the port list at cursor 0 (preset row).
 							m.netPortListOpen = true
 							m.netPortListCursor = 0
@@ -1663,16 +1714,14 @@ func computeLayout(m Model) Model {
 	//   "● Dev machine / Test VM (Suggested)"  → 2+21+1+11 = 35
 	//   "  ○ Disable password authentication"   → 2+2+31   = 35
 	// Tab bar peaks at 29 chars ("SSH hardening" active + 3 ghost tabs × 4).
-	const maxLeftW = 35
 	screenLeftW := m.width - 4 - m.rightContentW - 8
-	m.leftColW = max(min(maxLeftW, screenLeftW), 28)
+	m.leftColW = max(min(leftColMaxW, screenLeftW), leftColMinW)
 
 	// Stable vertical anchor.
 	// tallestBoxH covers the Packages tab (15 content lines) + topPad (1) +
 	// blank line below separator (1) + hints (3) + border (2) = 22,
 	// rounded up to 24 for the wider tab bar.
 	if m.rightContentH > 0 {
-		const tallestBoxH = 24
 		refBoxH := max(m.rightContentH+6, tallestBoxH)
 		m.stableTop = max(0, (m.height-refBoxH)/2)
 	}
@@ -1896,8 +1945,7 @@ func (m Model) View() string {
 func (m Model) viewTitle() string {
 	title := titleStyle.Render("boltx")
 	if !m.osInfo.IsRoot {
-		warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
-		return title + warnStyle.Render(" ● running without sudo")
+		return title + queuedStyle.Render(" ● running without sudo")
 	}
 	return title + greenStyle.Render(" ● running with sudo")
 }
@@ -2089,7 +2137,7 @@ func (m Model) viewUseCase() string {
 	suggested := m.env.SuggestedUseCase()
 	colW := m.leftColW
 	if colW == 0 {
-		colW = 40
+		colW = optionInputWidth
 	}
 	for i, uc := range useCaseOptions {
 		radio := radioOff
@@ -2285,7 +2333,6 @@ func (m Model) viewUSRBody(maxWidth int) string {
 			}
 			if isCursor && m.usrEditingSSHList {
 				indent := strings.Repeat(" ", lipgloss.Width(cur+kindTextInputMarker))
-				pendingStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Strikethrough(true)
 				items := sshKeyDisplayItems(user)
 				addIdx := len(items)
 				for i, item := range items {
@@ -2293,7 +2340,7 @@ func (m Model) viewUSRBody(maxWidth int) string {
 					isCursorItem := m.usrSSHListCursor == i
 					if item.pendingRemove {
 						hint := mutedStyle.Render("  [r: undo]")
-						label := pendingStyle.Render(apply.SSHKeyComment(item.key))
+						label := pendingRemoveStyle.Render(apply.SSHKeyComment(item.key))
 						if isCursorItem {
 							liCur = cursorStr
 						}
@@ -2521,6 +2568,9 @@ func (m Model) viewPortSubMenu(indent string) string {
 			cur = cursorStr
 			s = selectedStyle
 		}
+		if m.visualBell && m.subValues[0] == "" {
+			s = errorStyle
+		}
 		b.WriteString(indent + cur + s.Render(fromLabel+v) + "\n")
 	}
 
@@ -2541,6 +2591,9 @@ func (m Model) viewPortSubMenu(indent string) string {
 			if m.netPortSubMenuCursor == 2 {
 				cur = cursorStr
 				s = selectedStyle
+			}
+			if m.visualBell && m.subValues[1] == "" {
+				s = errorStyle
 			}
 			b.WriteString(indent + cur + s.Render("To:    "+v) + "\n")
 		}
@@ -2572,7 +2625,7 @@ func (m Model) viewCategoryReviewBody(maxWidth int) string {
 	if colW == 0 {
 		colW = m.leftColW
 		if colW == 0 {
-			colW = 40
+			colW = optionInputWidth
 		}
 	}
 
@@ -2591,9 +2644,9 @@ func (m Model) viewCategoryReviewBody(maxWidth int) string {
 			itemStyle = selectedStyle
 		}
 
-		dirty := isOptionQueued(opt)
+		queued := isOptionQueued(opt)
 		valStyle := mutedStyle
-		if dirty {
+		if queued {
 			valStyle = queuedStyle
 		}
 
@@ -2639,6 +2692,11 @@ func (m Model) viewCategoryReviewBody(maxWidth int) string {
 				}
 			}
 		case KindPortList:
+			if !m.ufwChecked() {
+				b.WriteString(renderOptionLine(cursor, kindListCollapsed, opt.Label, mutedStyle, colW))
+				b.WriteString(mutedStyle.Render(" (enable UFW in SEC tab)") + "\n")
+				break
+			}
 			listOpen := isCursor && m.netPortListOpen
 			marker := kindListCollapsed
 			if listOpen {
@@ -2652,7 +2710,7 @@ func (m Model) viewCategoryReviewBody(maxWidth int) string {
 			}
 			b.WriteString(renderOptionLine(cursor, marker, opt.Label, itemStyle, colW))
 			b.WriteString(valStyle.Render(countSuffix))
-			if dirty {
+			if queued {
 				b.WriteString(queuedStyle.Render(" ·"))
 			}
 			b.WriteString("\n")
@@ -2697,27 +2755,31 @@ func (m Model) viewCategoryReviewBody(maxWidth int) string {
 					b.WriteString(indent + addPresetsCur + addPresetsStyle.Render("+ Add presets") + "\n")
 					if m.netPortPresetsOpen {
 						presetIndent := indent + "  "
-						for pi, p := range netPresets {
+						opt2 := &m.categoryPages[tabIndexNET].Options[0]
+						visible := visiblePresetIndices(opt2)
+						for vi, origIdx := range visible {
+							p := netPresets[origIdx]
 							pCur := noCursorStr
 							pStyle := normalStyle
-							if m.netPortPresetCursor == pi {
+							if m.netPortPresetCursor == vi {
 								pCur = cursorStr
 								pStyle = selectedStyle
 							}
 							check := radioOff
-							if m.netPortPresetSel[pi] {
+							if m.netPortPresetSel[origIdx] {
 								check = radioOn
 							}
-							b.WriteString(presetIndent + pCur + pStyle.Render(check+p.Label) + "\n")
+							proto := mutedStyle.Render(" " + presetProtoLabel(p))
+							b.WriteString(presetIndent + pCur + pStyle.Render(check+p.Label) + proto + "\n")
 						}
-						confirmIdx := len(netPresets)
+						confirmIdx := len(visible)
 						confCur := noCursorStr
-						confStyle := mutedStyle
+						confStyle := normalStyle
 						if m.netPortPresetCursor == confirmIdx {
 							confCur = cursorStr
 							confStyle = selectedStyle
 						}
-						b.WriteString(presetIndent + confCur + confStyle.Render("[Confirm]") + "\n")
+						b.WriteString(presetIndent + confCur + confStyle.Render("Confirm") + "\n")
 					}
 				}
 			}
@@ -2731,7 +2793,7 @@ func (m Model) viewCategoryReviewBody(maxWidth int) string {
 				radio = radioOn
 			}
 			line := renderOptionLine(cursor, radio, opt.Label, itemStyle, colW)
-			if dirty {
+			if queued {
 				line += queuedStyle.Render(" ·")
 			}
 			b.WriteString(line + "\n")
@@ -3155,7 +3217,19 @@ func (m Model) startPortEdit(idx int) Model {
 }
 
 // confirmPortEdit saves the completed port rule and clears edit state.
-func (m Model) confirmPortEdit() Model {
+func (m Model) confirmPortEdit() (Model, tea.Cmd) {
+	if m.subValues[0] == "" {
+		m.inputError = "port cannot be empty"
+		m.ringBell = true
+		m.visualBell = true
+		return m, bellCmd()
+	}
+	if m.netPortSubMenuType == "range" && m.subValues[1] == "" {
+		m.inputError = "end port cannot be empty"
+		m.ringBell = true
+		m.visualBell = true
+		return m, bellCmd()
+	}
 	opt := &m.categoryPages[tabIndexNET].Options[0]
 	rule := apply.PortRule{
 		From:     m.subValues[0],
@@ -3174,7 +3248,7 @@ func (m Model) confirmPortEdit() Model {
 	m.inputSubStep = 0
 	m.subValues = [3]string{}
 	m.inputError = ""
-	return m
+	return m, nil
 }
 
 // cancelPortEdit aborts the port-edit submenu and returns to the port list.
@@ -3189,6 +3263,15 @@ func (m Model) cancelPortEdit() Model {
 	return m
 }
 
+// ufwChecked returns true when UFW is currently active or queued to be enabled in the SEC tab.
+func (m Model) ufwChecked() bool {
+	for _, opt := range m.categoryPages[tabIndexSEC].Options {
+		if opt.Label == "Enable UFW firewall" {
+			return opt.Checked
+		}
+	}
+	return false
+}
 
 // syncNetTab detects current system state for NET tab options (run once, guarded by Synced).
 func syncNetTab(pages []CategoryPage) []CategoryPage {
@@ -3198,7 +3281,7 @@ func syncNetTab(pages []CategoryPage) []CategoryPage {
 	opts := pages[tabIndexNET].Options
 	for i := range opts {
 		switch opts[i].Label {
-		case "FW: Open ports":
+		case "Firewall: Open ports":
 			detected := apply.DetectOpenPorts()
 			snapshot := make([]apply.PortRule, len(detected))
 			copy(snapshot, detected)
@@ -3301,5 +3384,5 @@ func renderOptionLine(cursor, radio, label string, style lipgloss.Style, maxWidt
 type bellClearedMsg struct{}
 
 func bellCmd() tea.Cmd {
-	return tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg { return bellClearedMsg{} })
+	return tea.Tick(bellClearDur, func(time.Time) tea.Msg { return bellClearedMsg{} })
 }
