@@ -81,12 +81,15 @@ func portRuleKeySet(rules []apply.PortRule) map[portRuleKey]bool {
 
 // netPreset describes a named group of port rules available in "Add presets".
 type netPreset struct {
-	Label string       `json:"label"`
+	Label string           `json:"label"`
 	Rules []apply.PortRule `json:"rules"`
 }
 
 //go:embed ufw_presets.json
 var ufwPresetsJSON []byte
+
+//go:embed pkg_categories.json
+var pkgCategoriesJSON []byte
 
 var netPresets = func() []netPreset {
 	var presets []netPreset
@@ -95,6 +98,34 @@ var netPresets = func() []netPreset {
 	}
 	return presets
 }()
+
+// pkgCategoryConfig holds the JSON structure for package categories.
+type pkgCategoryConfig struct {
+	Categories []struct {
+		Name     string   `json:"name"`
+		Packages []string `json:"packages"`
+	} `json:"categories"`
+}
+
+// pkgCategories is the ordered list of category names, loaded from JSON.
+var pkgCategories []string
+
+// pkgCategoryMap maps package label → category name, loaded from JSON.
+var pkgCategoryMap = map[string]string{}
+
+func init() {
+	var cfg pkgCategoryConfig
+	if err := json.Unmarshal(pkgCategoriesJSON, &cfg); err != nil {
+		panic("pkg_categories.json: " + err.Error())
+	}
+	pkgCategories = make([]string, len(cfg.Categories))
+	for i, cat := range cfg.Categories {
+		pkgCategories[i] = cat.Name
+		for _, pkg := range cat.Packages {
+			pkgCategoryMap[pkg] = cat.Name
+		}
+	}
+}
 
 // presetProtoLabel returns a short protocol suffix for display ("tcp", "udp", "tcp/udp").
 func presetProtoLabel(p netPreset) string {
@@ -192,6 +223,7 @@ type CategoryOption struct {
 	Priority          int                // GO! execution order; lower = earlier; 0 treated as PrioConfigWrite
 	PortRules         []apply.PortRule   // KindPortList: current list of port rules (existing + new)
 	DetectedPortRules []apply.PortRule   // KindPortList: rules detected from live system at sync time
+	PkgCategory       string             // PKG tab only: sub-category for grouping packages
 }
 
 // CategoryPage groups related options under a category name.
@@ -346,11 +378,47 @@ func buildCategoryPages(uc detect.UseCase, osInfo detect.OSInfo) []CategoryPage 
 		},
 		{
 			Name: "PKG",
-			Options: []CategoryOption{
-				{Label: "Placeholder A", Kind: KindToggle, Checked: true, ApplyFn: func(_ string) error { return nil }},
-				{Label: "Placeholder B", Kind: KindToggle, Checked: true, ApplyFn: func(_ string) error { return nil }},
-				{Label: "Placeholder C", Kind: KindToggle, Checked: true, ApplyFn: func(_ string) error { return nil }},
-			},
+			Options: filter([]CategoryOption{
+				{Label: "git", Kind: KindToggle, NeedsRoot: true, Priority: PrioPackageInstall, PkgCategory: pkgCategoryMap["git"], ApplyFn: func(_ string) error {
+					return apply.InstallPackage(osInfo.Pkg, "git")
+				}},
+				{Label: "curl", Kind: KindToggle, NeedsRoot: true, Priority: PrioPackageInstall, PkgCategory: pkgCategoryMap["curl"], ApplyFn: func(_ string) error {
+					return apply.InstallPackage(osInfo.Pkg, "curl")
+				}},
+				{Label: "wget", Kind: KindToggle, NeedsRoot: true, Priority: PrioPackageInstall, PkgCategory: pkgCategoryMap["wget"], ApplyFn: func(_ string) error {
+					return apply.InstallPackage(osInfo.Pkg, "wget")
+				}},
+				{Label: "vim", Kind: KindToggle, NeedsRoot: true, Priority: PrioPackageInstall, PkgCategory: pkgCategoryMap["vim"], ApplyFn: func(_ string) error {
+					return apply.InstallPackage(osInfo.Pkg, "vim")
+				}},
+				{Label: "htop", Kind: KindToggle, NeedsRoot: true, Priority: PrioPackageInstall, PkgCategory: pkgCategoryMap["htop"], ApplyFn: func(_ string) error {
+					return apply.InstallPackage(osInfo.Pkg, "htop")
+				}},
+				{Label: "tmux", Kind: KindToggle, NeedsRoot: true, Priority: PrioPackageInstall, PkgCategory: pkgCategoryMap["tmux"], ApplyFn: func(_ string) error {
+					return apply.InstallPackage(osInfo.Pkg, "tmux")
+				}},
+				{Label: "unzip", Kind: KindToggle, NeedsRoot: true, Priority: PrioPackageInstall, PkgCategory: pkgCategoryMap["unzip"], ApplyFn: func(_ string) error {
+					return apply.InstallPackage(osInfo.Pkg, "unzip")
+				}},
+				{Label: "rsync", Kind: KindToggle, NeedsRoot: true, Priority: PrioPackageInstall, PkgCategory: pkgCategoryMap["rsync"], ApplyFn: func(_ string) error {
+					return apply.InstallPackage(osInfo.Pkg, "rsync")
+				}},
+				{Label: "jq", Kind: KindToggle, NeedsRoot: true, Priority: PrioPackageInstall, PkgCategory: pkgCategoryMap["jq"], ApplyFn: func(_ string) error {
+					return apply.InstallPackage(osInfo.Pkg, "jq")
+				}},
+				{Label: "nginx", Kind: KindToggle, NeedsRoot: true, Priority: PrioPackageInstall, PkgCategory: pkgCategoryMap["nginx"], ApplyFn: func(_ string) error {
+					return apply.InstallPackage(osInfo.Pkg, "nginx")
+				}},
+				{Label: "fail2ban", Kind: KindToggle, NeedsRoot: true, Priority: PrioPackageInstall, PkgCategory: pkgCategoryMap["fail2ban"], ApplyFn: func(_ string) error {
+					return apply.InstallPackage(osInfo.Pkg, "fail2ban")
+				}},
+				{Label: "ufw", Kind: KindToggle, NeedsRoot: true, Priority: PrioPackageInstall, PkgCategory: pkgCategoryMap["ufw"], ApplyFn: func(_ string) error {
+					return apply.InstallPackage(osInfo.Pkg, "ufw")
+				}},
+				{Label: "docker", Kind: KindToggle, NeedsRoot: true, Priority: PrioPackageInstall, PkgCategory: pkgCategoryMap["docker"], ApplyFn: func(_ string) error {
+					return apply.InstallPackage(osInfo.Pkg, "docker")
+				}},
+			}),
 		},
 		{
 			Name: "RUN",
@@ -416,6 +484,8 @@ type Model struct {
 	activeTab          int // which category tab is visible
 	tabSubPage         int // sub-page within the active tab (for overflow)
 	categoryPageCursor int // cursor position within the current sub-page
+	pkgCategoryCursor  int // PKG tab: selected sub-category index
+	pkgCategoryOffset  int // PKG tab: first visible sub-category index
 
 	// Option editing — active while a KindTextInput is being edited.
 	// Only one option can be edited at a time.
@@ -818,7 +888,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			case "enter", " ":
-				absIdx := m.tabSubPage*maxOptionsPerPage + m.categoryPageCursor
+				var absIdx int
+				if m.activeTab == tabIndexPKG {
+					cat := pkgCategories[m.pkgCategoryCursor]
+					seen := 0
+					for i, opt := range m.categoryPages[m.activeTab].Options {
+						if opt.PkgCategory == cat {
+							if seen == m.categoryPageCursor {
+								absIdx = i
+								break
+							}
+							seen++
+						}
+					}
+				} else {
+					absIdx = m.tabSubPage*maxOptionsPerPage + m.categoryPageCursor
+				}
 				opt := &m.categoryPages[m.activeTab].Options[absIdx]
 				opt.Value = m.selectItems[m.selectCursor]
 				opt.Checked = true
@@ -1346,7 +1431,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 					}
 				} else {
-					absIdx := m.tabSubPage*maxOptionsPerPage + m.categoryPageCursor
+					var absIdx int
+					if m.activeTab == tabIndexPKG {
+						cat := pkgCategories[m.pkgCategoryCursor]
+						seen := 0
+						for i, opt := range m.categoryPages[m.activeTab].Options {
+							if opt.PkgCategory == cat {
+								if seen == m.categoryPageCursor {
+									absIdx = i
+									break
+								}
+								seen++
+							}
+						}
+					} else {
+						absIdx = m.tabSubPage*maxOptionsPerPage + m.categoryPageCursor
+					}
 					page := m.categoryPages[m.activeTab]
 					if absIdx < len(page.Options) {
 						resetOption(&m.categoryPages[m.activeTab].Options[absIdx])
@@ -1399,6 +1499,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.activeTab = 0
 				m.tabSubPage = 0
 				m.categoryPageCursor = 0
+				m.pkgCategoryCursor = 0
+				m.pkgCategoryOffset = 0
 			}
 
 		case "left", "h":
@@ -1408,17 +1510,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.categoryPageCursor = 0
 					labels := usrTabLabels(m.categoryPages[tabIndexUSR].UserEntries)
 					m.usrTabOffset = clampUsrTabOffset(labels, m.usrSubTab, m.usrTabOffset, m.leftColW+m.rightContentW+2)
+				} else if m.activeTab == tabIndexPKG && m.pkgCategoryCursor > 0 {
+					m.pkgCategoryCursor--
+					m.categoryPageCursor = 0
+					m.pkgCategoryOffset = clampPkgOffset(m.pkgCategoryCursor, m.pkgCategoryOffset, m.leftColW+m.rightContentW+2)
 				} else if m.activeTab > 0 {
 					m.activeTab--
 					m.tabSubPage = 0
 					m.categoryPageCursor = 0
+					m.pkgCategoryCursor = 0
+					m.usrSubTab = 0
+					m.usrTabOffset = 0
 					m.editingOption = false
 					m.selectingOption = false
 					m.usrEditingSSHList = false
 					m.netPortListOpen = false
 					m.netPortEditing = false
 					m.inputError = ""
-					m.categoryPages = syncOnTabEnter(m.activeTab, m.categoryPages)
+					m.categoryPages = syncOnTabEnter(m.activeTab, m.categoryPages, m.osInfo.Pkg)
 				}
 			}
 
@@ -1430,17 +1539,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.categoryPageCursor = 0
 					labels := usrTabLabels(m.categoryPages[tabIndexUSR].UserEntries)
 					m.usrTabOffset = clampUsrTabOffset(labels, m.usrSubTab, m.usrTabOffset, m.leftColW+m.rightContentW+2)
+				} else if m.activeTab == tabIndexPKG && m.pkgCategoryCursor < len(pkgCategories)-1 {
+					m.pkgCategoryCursor++
+					m.categoryPageCursor = 0
+					m.pkgCategoryOffset = clampPkgOffset(m.pkgCategoryCursor, m.pkgCategoryOffset, m.leftColW+m.rightContentW+2)
 				} else if m.activeTab < len(m.categoryPages)-1 {
 					m.activeTab++
 					m.tabSubPage = 0
 					m.categoryPageCursor = 0
+					m.pkgCategoryCursor = 0
+					m.pkgCategoryOffset = 0
+					m.usrSubTab = 0
+					m.usrTabOffset = 0
 					m.editingOption = false
 					m.selectingOption = false
 					m.usrEditingSSHList = false
 					m.netPortListOpen = false
 					m.netPortEditing = false
 					m.inputError = ""
-					m.categoryPages = syncOnTabEnter(m.activeTab, m.categoryPages)
+					m.categoryPages = syncOnTabEnter(m.activeTab, m.categoryPages, m.osInfo.Pkg)
 				}
 			}
 
@@ -1460,6 +1577,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case pageReview:
 				if m.activeTab == tabIndexUSR && m.osInfo.IsRoot {
+					if m.categoryPageCursor > 0 {
+						m.categoryPageCursor--
+					}
+				} else if m.activeTab == tabIndexPKG {
 					if m.categoryPageCursor > 0 {
 						m.categoryPageCursor--
 					}
@@ -1496,6 +1617,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						maxCursor = 0 // New User tab has no options to navigate
 					}
 					if m.categoryPageCursor < maxCursor {
+						m.categoryPageCursor++
+					}
+				} else if m.activeTab == tabIndexPKG {
+					cat := pkgCategories[m.pkgCategoryCursor]
+					var count int
+					for _, opt := range m.categoryPages[m.activeTab].Options {
+						if opt.PkgCategory == cat {
+							count++
+						}
+					}
+					if m.categoryPageCursor < count-1 {
 						m.categoryPageCursor++
 					}
 				} else {
@@ -1543,6 +1675,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.activeTab = 0
 					m.tabSubPage = 0
 					m.categoryPageCursor = 0
+					m.pkgCategoryCursor = 0
 					m.page = pageReview
 				}
 			case pageReview:
@@ -1611,12 +1744,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 					}
 				} else {
-					curPage := m.categoryPages[m.activeTab]
-					startIdx := m.tabSubPage * maxOptionsPerPage
-					endIdx := min(startIdx+maxOptionsPerPage, len(curPage.Options))
-					subPageLen := endIdx - startIdx
+					var absIdx int
+					var subPageLen int
+					if m.activeTab == tabIndexPKG {
+						cat := pkgCategories[m.pkgCategoryCursor]
+						seen := 0
+						for i, opt := range m.categoryPages[m.activeTab].Options {
+							if opt.PkgCategory == cat {
+								if seen == m.categoryPageCursor {
+									absIdx = i
+									break
+								}
+								seen++
+							}
+						}
+						subPageLen = seen
+					} else {
+						curPage := m.categoryPages[m.activeTab]
+						startIdx := m.tabSubPage * maxOptionsPerPage
+						endIdx := min(startIdx+maxOptionsPerPage, len(curPage.Options))
+						subPageLen = endIdx - startIdx
+						absIdx = startIdx + m.categoryPageCursor
+					}
 					if m.categoryPageCursor < subPageLen {
-						absIdx := startIdx + m.categoryPageCursor
 						opt := &m.categoryPages[m.activeTab].Options[absIdx]
 						switch opt.Kind {
 						case KindTextInput:
@@ -1771,6 +1921,7 @@ func (m Model) View() string {
 		tabBarLines := strings.Split(tabBar, "\n")
 		tabBarBottomLine := tabBarLines[len(tabBarLines)-1]
 		tabBarBottomW := lipgloss.Width(tabBarBottomLine)
+		tabBarW := lipgloss.Width(tabBar)
 		// Indent the visible tab lines one extra space to the right.
 		topLines := tabBarLines[:len(tabBarLines)-1]
 		for i, l := range topLines {
@@ -1781,12 +1932,14 @@ func (m Model) View() string {
 		// Regular block: PaddingLeft(2) + Width(leftW), no PaddingRight.
 		// A purple │ is appended to every line instead, forming the vertical
 		// separator. Total line width = leftW+3 (same as with PaddingRight(1)).
+		// Ensure the width accommodates the tab bar so it never wraps.
+		aboveSepW := max(leftW, tabBarW)
 		aboveSepTop := strings.Repeat("\n", topPad) +
 			m.viewTitle() + "\n" +
 			subtitleStyle.Render("Review settings") + "\n\n" +
 			tabBarTopPart
 		regularBlock := lipgloss.NewStyle().PaddingLeft(2).Render(
-			lipgloss.NewStyle().Width(leftW).Render(aboveSepTop))
+			lipgloss.NewStyle().Width(aboveSepW).Render(aboveSepTop))
 		purpleBar := lipgloss.NewStyle().Foreground(Themes[m.themeIdx].Accent).Render("│")
 		regularLines := strings.Split(regularBlock, "\n")
 		for i, l := range regularLines {
@@ -1797,9 +1950,9 @@ func (m Model) View() string {
 		// Connector line: "───" + tab bar bottom chars + "─" fill + "╯".
 		// The tabs are indented 1 extra space (see above), so we use 3 leading
 		// dashes instead of 2 and subtract 1 from remaining to keep the total
-		// width at leftW+3 (matching every regularBlock line).
+		// width at aboveSepW+3 (matching every regularBlock line).
 		// The ╯ closes the vertical separator against the connector.
-		remaining := leftW - tabBarBottomW - 1
+		remaining := aboveSepW - tabBarBottomW - 1
 		bareBottom := ansiEscape.ReplaceAllString(tabBarBottomLine, "")
 		bare := "───" + bareBottom
 		if remaining > 0 {
@@ -1817,7 +1970,7 @@ func (m Model) View() string {
 		innerW := bottomContentW + 3
 		sepLine := lipgloss.NewStyle().Foreground(Themes[m.themeIdx].Accent).Render(strings.Repeat("─", innerW))
 		bodyPrefix := "\n"
-		if m.activeTab == tabIndexUSR {
+		if m.activeTab == tabIndexUSR || m.activeTab == tabIndexPKG {
 			bodyPrefix = ""
 		}
 		bodyBlock := lipgloss.NewStyle().
@@ -1832,14 +1985,14 @@ func (m Model) View() string {
 		box = boxStyle.Render(lipgloss.JoinVertical(lipgloss.Left, aboveRow, bodyBlock, sepLine, hintsBlock))
 
 		// Insert ╮ into the top border directly above the │ separator column.
-		// The separator is at inner-content column leftW+2; top-border rune
-		// index = (leftW+2) + 1 = leftW+3 (offset by 1 for the leading ╭).
-		// leftW adapts to rightContentW so this stays correct if the table grows.
+		// The separator is at inner-content column aboveSepW+2; top-border rune
+		// index = (aboveSepW+2) + 1 = aboveSepW+3 (offset by 1 for the leading ╭).
+		// aboveSepW adapts to tabBarW so this stays correct if the tab bar grows.
 		boxLines := strings.Split(box, "\n")
 		if len(boxLines) > 0 {
 			stripped := ansiEscape.ReplaceAllString(boxLines[0], "")
 			runes := []rune(stripped)
-			if pos := leftW + 3; pos < len(runes) {
+			if pos := aboveSepW + 3; pos < len(runes) {
 				runes[pos] = '┬'
 				boxLines[0] = lipgloss.NewStyle().Foreground(Themes[m.themeIdx].Accent).Render(string(runes))
 			}
@@ -2500,6 +2653,94 @@ func clampUsrTabOffset(labels []string, activeIdx, offset, maxWidth int) int {
 	}
 }
 
+// clampPkgOffset returns the smallest offset ≥ current that keeps activeIdx visible.
+func clampPkgOffset(activeIdx, offset, maxWidth int) int {
+	if activeIdx < offset {
+		return activeIdx
+	}
+	labels := pkgCategories
+	const sep = "   "
+	widths := make([]int, len(labels))
+	for i, l := range labels {
+		widths[i] = len([]rune(l))
+	}
+	for {
+		// Compute visible end from offset.
+		budget := maxWidth
+		if offset > 0 {
+			budget -= 1 + len([]rune(sep))
+		}
+		hi := offset
+		for hi < len(labels) {
+			w := widths[hi]
+			if hi > offset {
+				w += len([]rune(sep))
+			}
+			if hi+1 < len(labels) && budget-w < 1+len([]rune(sep)) {
+				break
+			}
+			budget -= w
+			hi++
+		}
+		if activeIdx < hi {
+			return offset
+		}
+		offset++
+		if offset > activeIdx {
+			return activeIdx
+		}
+	}
+}
+
+// pkgCategorySlidingWindow renders the PKG sub-category row as a single line.
+// Only shows ‹ when categories are hidden to the left, › when hidden to the right.
+func (m Model) pkgCategorySlidingWindow(maxWidth int) string {
+	const sep = "   "
+	activeStyle := lipgloss.NewStyle().Foreground(Themes[m.themeIdx].Accent).Bold(true)
+	labels := pkgCategories
+
+	// Measure widths.
+	widths := make([]int, len(labels))
+	for i, l := range labels {
+		widths[i] = len([]rune(l))
+	}
+
+	// Compute visible range from offset.
+	budget := maxWidth
+	if m.pkgCategoryOffset > 0 {
+		budget -= 1 + len([]rune(sep)) // reserve for "‹"
+	}
+	hi := m.pkgCategoryOffset
+	for hi < len(labels) {
+		w := widths[hi]
+		if hi > m.pkgCategoryOffset {
+			w += len([]rune(sep))
+		}
+		// Reserve space for "›" if more items remain.
+		if hi+1 < len(labels) && budget-w < 1+len([]rune(sep)) {
+			break
+		}
+		budget -= w
+		hi++
+	}
+
+	var parts []string
+	if m.pkgCategoryOffset > 0 {
+		parts = append(parts, mutedStyle.Render("‹"))
+	}
+	for i := m.pkgCategoryOffset; i < hi; i++ {
+		if i == m.pkgCategoryCursor {
+			parts = append(parts, activeStyle.Render(labels[i]))
+		} else {
+			parts = append(parts, mutedStyle.Render(labels[i]))
+		}
+	}
+	if hi < len(labels) {
+		parts = append(parts, mutedStyle.Render("›"))
+	}
+	return strings.Join(parts, sep)
+}
+
 // usrTabSlidingWindow renders the user sub-tab row as a single line starting at offset.
 // Only scrolls when activeIdx goes off-screen (lazy scroll).
 func usrTabSlidingWindow(labels []string, activeIdx, offset, maxWidth int, activeStyle lipgloss.Style) string {
@@ -2600,7 +2841,7 @@ func (m Model) viewPortSubMenu(indent string) string {
 	}
 
 	// Proto row
-	row(protoIdx, "Proto: ", proto+"\n")
+	row(protoIdx, "Proto: ", proto+"\n\n")
 
 	// Confirm row
 	row(confirmIdx, "Confirm", "")
@@ -2631,9 +2872,23 @@ func (m Model) viewCategoryReviewBody(maxWidth int) string {
 
 	page := m.categoryPages[m.activeTab]
 
-	startIdx := m.tabSubPage * maxOptionsPerPage
-	endIdx := min(startIdx+maxOptionsPerPage, len(page.Options))
-	subOpts := page.Options[startIdx:endIdx]
+	if m.activeTab == tabIndexPKG {
+		b.WriteString(m.pkgCategorySlidingWindow(maxWidth) + "\n\n")
+	}
+
+	var subOpts []CategoryOption
+	if m.activeTab == tabIndexPKG {
+		cat := pkgCategories[m.pkgCategoryCursor]
+		for _, opt := range page.Options {
+			if opt.PkgCategory == cat {
+				subOpts = append(subOpts, opt)
+			}
+		}
+	} else {
+		startIdx := m.tabSubPage * maxOptionsPerPage
+		endIdx := min(startIdx+maxOptionsPerPage, len(page.Options))
+		subOpts = page.Options[startIdx:endIdx]
+	}
 
 	for i, opt := range subOpts {
 		cursor := noCursorStr
@@ -3052,9 +3307,11 @@ func (m Model) viewTabBar() string {
 	for i, page := range m.categoryPages {
 		if i == m.activeTab {
 			label := page.Name
-			n := subPageCount(len(page.Options))
-			if n > 1 {
-				label = fmt.Sprintf("%s %d/%d", page.Name, m.tabSubPage+1, n)
+			if page.Name != "PKG" {
+				n := subPageCount(len(page.Options))
+				if n > 1 {
+					label = fmt.Sprintf("%s %d/%d", page.Name, m.tabSubPage+1, n)
+				}
 			}
 			parts[i] = activeTabStyle.Render(label)
 		} else {
@@ -3068,7 +3325,7 @@ func (m Model) viewTabBar() string {
 
 // syncOnTabEnter is called every time the active tab changes.
 // It dispatches to tab-specific sync functions as they are implemented.
-func syncOnTabEnter(tabIdx int, pages []CategoryPage) []CategoryPage {
+func syncOnTabEnter(tabIdx int, pages []CategoryPage, pm detect.PackageManager) []CategoryPage {
 	switch tabIdx {
 	case tabIndexUSR:
 		return syncUsrTab(pages)
@@ -3077,7 +3334,7 @@ func syncOnTabEnter(tabIdx int, pages []CategoryPage) []CategoryPage {
 	case tabIndexNET:
 		return syncNetTab(pages)
 	case tabIndexPKG:
-		return syncPkgTab(pages)
+		return syncPkgTab(pages, pm)
 	case tabIndexRUN:
 		return syncRunTab(pages)
 	}
@@ -3298,9 +3555,55 @@ func syncNetTab(pages []CategoryPage) []CategoryPage {
 	return pages
 }
 
-// syncPkgTab auto-toggles packages required by other tabs' checked options.
-// Stub — logic added when PKG options are implemented.
-func syncPkgTab(pages []CategoryPage) []CategoryPage { return pages }
+// syncPkgTab detects installed packages and auto-checks cross-tab dependencies.
+func syncPkgTab(pages []CategoryPage, pm detect.PackageManager) []CategoryPage {
+	if pages[tabIndexPKG].Synced {
+		return pages
+	}
+	opts := pages[tabIndexPKG].Options
+
+	for i := range opts {
+		installed := apply.DetectPackageInstalled(pm, opts[i].Label)
+		opts[i].OriginalChecked = installed
+		opts[i].Checked = opts[i].Checked || installed
+	}
+
+	// Cross-tab wiring from NET tab (NET is always synced before PKG in normal flow).
+	netFail2banOn := false
+	netProxy := "none"
+	for _, opt := range pages[tabIndexNET].Options {
+		switch opt.Label {
+		case "Enable fail2ban":
+			netFail2banOn = opt.Checked
+		case "Proxy":
+			v := opt.Value
+			if v == "" {
+				v = opt.Default
+			}
+			netProxy = v
+		}
+	}
+	for i := range opts {
+		switch opts[i].Label {
+		case "fail2ban":
+			if netFail2banOn {
+				opts[i].Checked = true
+			}
+		case "nginx":
+			if netProxy == "nginx" {
+				opts[i].Checked = true
+			}
+		case "docker":
+			if netProxy == "traefik" {
+				opts[i].Checked = true
+			}
+		}
+	}
+
+	pages[tabIndexPKG].Options = opts
+	pages[tabIndexPKG].Synced = true
+	return pages
+}
 
 // syncRunTab rebuilds the RUN tab based on what was selected in other tabs.
 // Stub — logic added when RUN options are implemented.

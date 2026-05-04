@@ -1,0 +1,28 @@
+{
+  "categories": [
+    {
+      "name": "Essentials",
+      "packages": ["git", "curl", "wget", "docker"]
+    },
+    {
+      "name": "Editors",
+      "packages": ["vim"]
+    },
+    {
+      "name": "Terminal",
+      "packages": ["htop", "tmux"]
+    },
+    {
+      "name": "Utils",
+      "packages": ["unzip", "rsync", "jq"]
+    },
+    {
+      "name": "Network",
+      "packages": ["nginx"]
+    },
+    {
+      "name": "Security",
+      "packages": ["fail2ban", "ufw"]
+    }
+  ]
+}
